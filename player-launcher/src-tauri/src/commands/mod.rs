@@ -6,4 +6,5 @@
 pub mod paths;
 pub mod prism;
 pub mod psp;
+pub mod secrets;
 pub mod updater;

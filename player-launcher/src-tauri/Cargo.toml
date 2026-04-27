@@ -26,6 +26,9 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 ureq = { workspace = true }
 zip = { workspace = true }
+# OS native secret store (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+# instance_token / updater_token 등 user session 보호 단위로 격리. master password 불필요.
+keyring = "3"
 
 # 공유 크레이트 (servers.toml 스키마/파서)
 pengport-shared = { path = "../../shared" }

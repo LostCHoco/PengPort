@@ -19,6 +19,10 @@ pub fn run() {
             commands::updater::set_update_token,
             commands::updater::update_token_source,
             commands::updater::validate_update_token,
+            // secrets (OS keychain — instance_token)
+            commands::secrets::instance_token_save,
+            commands::secrets::instance_token_load,
+            commands::secrets::instance_token_clear,
             // PSP
             commands::psp::psp_load_instance,
             commands::psp::psp_load_manifest,

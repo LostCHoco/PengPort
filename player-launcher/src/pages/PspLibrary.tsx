@@ -6,7 +6,9 @@
 // 3. ServiceCard 렌더링 (status polling, action 버튼)
 // 4. NeedsConfirm 받으면 ConsentDialog → 동의 후 invoke 재시도
 //
-// 인스턴스 / 토큰 영속화: localStorage (간단). OS keychain 통합은 추후 트랙 14 잔여.
+// 영속화:
+// - instance URL: localStorage (시크릿 아님, identifier)
+// - instance bearer token: OS keychain (`@/lib/secrets`) — 평문 디스크 차단
 
 import { useCallback, useEffect, useState } from "react";
 import { ConsentDialog, type ConsentRequest } from "@/components/ConsentDialog";
@@ -28,32 +30,24 @@ import {
   type ServiceManifest,
   type ServicesCatalog,
 } from "@/lib/psp";
+import { instanceToken, loadInstanceTokenWithMigration } from "@/lib/secrets";
 
 // ====== 영속화 ======
 
 const LS_INSTANCE_URL = "pengport.instance_url";
-const LS_INSTANCE_TOKEN = "pengport.instance_token";
 
 function loadInstanceUrl(): string | null {
   return localStorage.getItem(LS_INSTANCE_URL);
 }
 
-function loadInstanceToken(): string | null {
-  return localStorage.getItem(LS_INSTANCE_TOKEN);
-}
-
-function saveInstance(url: string, token: string | null) {
+async function saveInstance(url: string, token: string | null): Promise<void> {
   localStorage.setItem(LS_INSTANCE_URL, url);
-  if (token) {
-    localStorage.setItem(LS_INSTANCE_TOKEN, token);
-  } else {
-    localStorage.removeItem(LS_INSTANCE_TOKEN);
-  }
+  await instanceToken.save(token ?? "");
 }
 
-function clearInstance() {
+async function clearInstance(): Promise<void> {
   localStorage.removeItem(LS_INSTANCE_URL);
-  localStorage.removeItem(LS_INSTANCE_TOKEN);
+  await instanceToken.clear();
 }
 
 // ====== 컴포넌트 상태 ======
@@ -136,31 +130,35 @@ export default function PspLibrary() {
     [],
   );
 
-  // 마운트 시 저장된 instance 로드 시도.
+  // 마운트 시 저장된 instance 로드 시도. token 은 keyring 에서 (legacy localStorage 자동 마이그레이션).
   useEffect(() => {
     const url = loadInstanceUrl();
     if (!url) {
       setState({ kind: "needs_setup" });
       return;
     }
-    const token = loadInstanceToken();
-    void loadFromInstance(url, token);
+    void (async () => {
+      const token = await loadInstanceTokenWithMigration();
+      await loadFromInstance(url, token);
+    })();
   }, [loadFromInstance]);
 
   const handleSetupSubmit = useCallback(
     async (url: string, token: string) => {
-      saveInstance(url, token || null);
+      await saveInstance(url, token || null);
       await loadFromInstance(url, token || null);
     },
     [loadFromInstance],
   );
 
   const handleClearInstance = useCallback(() => {
-    clearInstance();
-    instanceCache.clear();
-    catalogCache.clear();
-    manifestCache.clear();
-    setState({ kind: "needs_setup" });
+    void (async () => {
+      await clearInstance();
+      instanceCache.clear();
+      catalogCache.clear();
+      manifestCache.clear();
+      setState({ kind: "needs_setup" });
+    })();
   }, []);
 
   // ====== Action invoke ======
@@ -282,7 +280,10 @@ export default function PspLibrary() {
               size="sm"
               variant="outline"
               onClick={() =>
-                loadFromInstance(state.instanceUrl, loadInstanceToken())
+                void (async () => {
+                  const token = await loadInstanceTokenWithMigration();
+                  await loadFromInstance(state.instanceUrl, token);
+                })()
               }
             >
               다시 시도
