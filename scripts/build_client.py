@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -41,17 +42,20 @@ NPM = "npm.cmd" if sys.platform == "win32" else "npm"
 
 # Self-hosted update endpoint. installer/sig/latest.json 모두 같은 디렉터리에 배치.
 # Caddy 가 Bearer 토큰 검증 후 정적 서빙.
-UPDATES_BASE_URL = "https://pengdoll.duckdns.org/updates"
+# instance 별로 도메인이 다르므로 환경변수 override 가능 (GH Actions / 다른 instance fork).
+UPDATES_BASE_URL = os.environ.get(
+    "PENGPORT_UPDATES_BASE_URL",
+    "https://pengdoll.duckdns.org/updates",
+)
 
 # 빌드 시 클라에 임베드되는 토큰 / Caddy 검증 토큰 키.
 UPDATES_TOKEN_ENV = "PENGPORT_UPDATES_TOKEN"
 
-# Oracle 자동 업로드 설정.
-# REMOTE_UPDATES_DIR 은 ops repo 의 docker-compose.yml 의 caddy 가 mount 하는 host path.
-# 기본 ~/updates (펭돌서버 instance.env 의 UPDATES_HOST_DIR=/home/ubuntu/updates).
-# 다른 instance 운영자는 자기 ops 의 instance.env 와 일치시키면 됨.
-SSH_HOST = "oracle"  # ~/.ssh/config 의 Host alias
-REMOTE_UPDATES_DIR = "~/updates"
+# 자동 업로드 설정. 다른 instance 운영자가 fork 시 환경변수로 override 가능.
+# - PENGPORT_DEPLOY_SSH_HOST: ssh config 의 Host alias 또는 직접 host[:port]
+# - PENGPORT_DEPLOY_UPDATES_DIR: 원격 호스트의 caddy mount source 디렉토리 경로
+SSH_HOST = os.environ.get("PENGPORT_DEPLOY_SSH_HOST", "oracle")
+REMOTE_UPDATES_DIR = os.environ.get("PENGPORT_DEPLOY_UPDATES_DIR", "~/updates")
 
 
 def read_tauri_conf() -> dict:

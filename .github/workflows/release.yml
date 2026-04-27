@@ -1,0 +1,108 @@
+name: Release
+
+# Tag push (v0.1.1, v0.2.0 등) 또는 수동 실행 시 PengPort 클라이언트를 빌드하여
+# 인스턴스의 self-hosted updates endpoint 에 SCP 배포.
+#
+# 펭돌서버 instance 의 oracle Caddy 가 Bearer 토큰 보호된 file_server 로 서빙.
+# 다른 instance 운영자가 fork 시 GH Secrets 만 자기 환경에 맞게 채우면 동일하게 작동.
+#
+# 필요 GH Secrets (Settings → Secrets and variables → Actions):
+#   - TAURI_SIGNING_PRIVATE_KEY        : minisign 서명 키 (.secrets/pengport-updater.key 내용)
+#   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 서명 키 password (현재 빈 값)
+#   - PENGPORT_UPDATES_TOKEN           : 빌드 시 client 에 임베드되는 update auth 토큰
+#   - ORACLE_SSH_PRIVATE_KEY           : oracle SCP 인증용 private key 전체 내용
+#   - ORACLE_KNOWN_HOSTS               : ssh-keyscan 결과 (MITM 방지)
+#   - ORACLE_HOST                      : oracle 의 hostname (예: pengdoll.duckdns.org)
+#   - ORACLE_USER                      : oracle 의 user (예: ubuntu)
+#   - ORACLE_PORT                      : oracle 의 SSH port (예: 2222)
+#
+# 자세한 셋업 가이드: docs/guide/release-automation.md
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag version matches tauri.conf.json
+        shell: bash
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          CONF_VERSION=$(jq -r .version player-launcher/src-tauri/tauri.conf.json)
+          if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
+            echo "✗ Tag v$TAG_VERSION 과 tauri.conf.json 의 version $CONF_VERSION 가 일치하지 않습니다."
+            echo "  → tauri.conf.json 의 version 을 bump 한 commit 후 같은 version 의 tag 를 push 하세요."
+            exit 1
+          fi
+          echo "✓ Tag v$TAG_VERSION ≡ tauri.conf.json"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup Rust
+        shell: bash
+        run: |
+          rustup default stable
+          rustup show
+
+      - name: Setup SSH (oracle deploy alias)
+        shell: bash
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_PORT: ${{ secrets.ORACLE_PORT }}
+          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+          ORACLE_KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$ORACLE_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host oracle
+            HostName $ORACLE_HOST
+            User $ORACLE_USER
+            Port $ORACLE_PORT
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+          # 연결 테스트 (인증 성공 + 호스트 키 검증 통과 확인)
+          ssh oracle "echo 'ssh oracle OK'; uname -a"
+
+      - name: Restore Tauri signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          mkdir -p .secrets
+          printf '%s\n' "$KEY" > .secrets/pengport-updater.key
+
+      - name: Build and deploy (build_client.py)
+        shell: bash
+        env:
+          PENGPORT_UPDATES_TOKEN: ${{ secrets.PENGPORT_UPDATES_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: python scripts/build_client.py
+
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: |
+          rm -f .secrets/pengport-updater.key
+          rm -f ~/.ssh/deploy_key
+          rm -f ~/.ssh/config
