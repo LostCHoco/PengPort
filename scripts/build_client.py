@@ -47,8 +47,11 @@ UPDATES_BASE_URL = "https://pengdoll.duckdns.org/updates"
 UPDATES_TOKEN_ENV = "PENGPORT_UPDATES_TOKEN"
 
 # Oracle 자동 업로드 설정.
+# REMOTE_UPDATES_DIR 은 ops repo 의 docker-compose.yml 의 caddy 가 mount 하는 host path.
+# 기본 ~/updates (펭돌서버 instance.env 의 UPDATES_HOST_DIR=/home/ubuntu/updates).
+# 다른 instance 운영자는 자기 ops 의 instance.env 와 일치시키면 됨.
 SSH_HOST = "oracle"  # ~/.ssh/config 의 Host alias
-REMOTE_UPDATES_DIR = "~/pengport-workspace/updates"
+REMOTE_UPDATES_DIR = "~/updates"
 
 
 def read_tauri_conf() -> dict:
