@@ -34,6 +34,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import zipfile
 
+# Windows console default codec (cp949/cp1252) 가 한국어 print 시 UnicodeEncodeError.
+# laptop 빌드 + GH Actions windows-latest 양쪽에서 동일 문제이므로 코드 측에서 utf-8 강제.
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 ROOT = Path(__file__).resolve().parents[1]
 TAURI_CONF = ROOT / "player-launcher" / "src-tauri" / "tauri.conf.json"
 
