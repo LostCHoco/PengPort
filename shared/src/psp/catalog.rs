@@ -7,7 +7,7 @@
 //! 1. **단일 파일** (`services.toml`) — 전체 catalog 한 파일. 작은 인스턴스용.
 //! 2. **디렉토리** (`services.d/*.toml`) — service 별 별도 파일. Linux `*.d` 패턴.
 //!
-//! 클라이언트는 항상 **단일 catalog 응답** 만 받는다. broadcaster (또는 정적 호스팅 도구)
+//! 클라이언트는 항상 **단일 catalog 응답** 만 받는다. gateway (또는 정적 호스팅 도구)
 //! 가 디렉토리 모드 시 합쳐서 응답. `merge_catalog_dir()` 가 그 통합 helper.
 
 use std::fs;
@@ -107,7 +107,7 @@ pub enum CatalogMergeError {
 
 /// 한 디렉토리 안의 `*.toml` 을 모두 읽어 단일 `ServicesCatalog` 으로 합친다.
 ///
-/// 운영자 측 broadcaster 가 호출 (`/services` GET 응답 생성). 클라이언트는
+/// 운영자 측 gateway 가 호출 (`/services` GET 응답 생성). 클라이언트는
 /// 항상 단일 응답만 받는다.
 ///
 /// ## 규칙

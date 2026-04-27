@@ -43,7 +43,7 @@ pub struct InstanceEndpoints {
     /// services.toml 또는 합쳐진 services.d/ URL.
     pub catalog: String,
 
-    /// broadcaster SSE URL (선택). 없으면 클라이언트가 service event 직접 구독.
+    /// gateway SSE URL (선택). 없으면 클라이언트가 service event 직접 구독.
     #[serde(default)]
     pub events: Option<String>,
 }

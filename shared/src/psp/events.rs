@@ -4,7 +4,7 @@
 //!
 //! 두 가지 컨텍스트:
 //! - `ServiceEvent`: service 직접 events endpoint 의 event payload
-//! - `InstanceEvent`: broadcaster 가 multiplexing 한 instance-level 이벤트
+//! - `InstanceEvent`: gateway 가 multiplexing 한 instance-level 이벤트
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,9 +45,9 @@ pub struct CustomEvent {
     pub payload: Value,
 }
 
-/// instance 의 `endpoints.events` (broadcaster) SSE 스트림에서 받는 이벤트.
+/// instance 의 `endpoints.events` (gateway) SSE 스트림에서 받는 이벤트.
 ///
-/// broadcaster 가 인스턴스 안 모든 service event 를 wrapping 해서 push 한다.
+/// gateway 가 인스턴스 안 모든 service event 를 wrapping 해서 push 한다.
 /// service 별 event 와 달리 `service_id` 가 항상 포함.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]

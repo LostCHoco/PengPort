@@ -28,7 +28,7 @@ export interface InstanceAuth {
 export interface InstanceEndpoints {
   /** services.toml 또는 services.d/ URL. */
   catalog: string;
-  /** broadcaster SSE URL (선택). */
+  /** gateway SSE URL (선택). */
   events?: string;
 }
 
