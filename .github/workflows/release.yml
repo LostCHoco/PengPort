@@ -6,14 +6,18 @@ name: Release
 # 펭돌서버 instance 의 oracle Caddy 가 Bearer 토큰 보호된 file_server 로 서빙.
 # 다른 instance 운영자가 fork 시 GH Secrets 만 자기 환경에 맞게 채우면 동일하게 작동.
 #
+# SSH 권한 격리: deploy 는 격리된 SFTP-only user (예: pengport-updater) 만 사용.
+#   - oracle 의 그 user 는 `restrict,command="internal-sftp"` 로 shell/임의 명령 차단
+#   - file permission 으로 그 user home 만 접근 가능 (ubuntu user 의 secrets 는 격리)
+#
 # 필요 GH Secrets (Settings → Secrets and variables → Actions):
 #   - TAURI_SIGNING_PRIVATE_KEY        : minisign 서명 키 (.secrets/pengport-updater.key 내용)
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 서명 키 password (현재 빈 값)
 #   - PENGPORT_UPDATES_TOKEN           : 빌드 시 client 에 임베드되는 update auth 토큰
-#   - ORACLE_SSH_PRIVATE_KEY           : oracle SCP 인증용 private key 전체 내용
+#   - ORACLE_SSH_PRIVATE_KEY           : SFTP 인증용 private key (pengport-updater 의 authorized_keys 와 짝)
 #   - ORACLE_KNOWN_HOSTS               : ssh-keyscan 결과 (MITM 방지)
 #   - ORACLE_HOST                      : oracle 의 hostname (예: pengdoll.duckdns.org)
-#   - ORACLE_USER                      : oracle 의 user (예: ubuntu)
+#   - ORACLE_USER                      : 격리된 deploy user (예: pengport-updater) — ubuntu 가 아님
 #   - ORACLE_PORT                      : oracle 의 SSH port (예: 2222)
 #
 # 자세한 셋업 가이드: docs/guide/release-automation.md
@@ -81,8 +85,9 @@ jobs:
             StrictHostKeyChecking yes
           EOF
           chmod 600 ~/.ssh/config
-          # 연결 테스트 (인증 성공 + 호스트 키 검증 통과 확인)
-          ssh oracle "echo 'ssh oracle OK'; uname -a"
+          # SFTP 연결 테스트 (ForceCommand internal-sftp 환경 호환).
+          # 일반 ssh 명령은 차단되므로 sftp client 로 인증/호스트키만 검증.
+          echo "exit" | sftp -b - oracle && echo "✓ SFTP 인증 OK"
 
       - name: Restore Tauri signing key
         shell: bash
@@ -97,6 +102,9 @@ jobs:
         env:
           PENGPORT_UPDATES_TOKEN: ${{ secrets.PENGPORT_UPDATES_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # build_client.py 가 SSH_HOST 가 비어있지 않을 때만 SCP. workflow 에서 활성화.
+          PENGPORT_DEPLOY_SSH_HOST: oracle
+          PENGPORT_DEPLOY_UPDATES_DIR: "~/updates"
         run: python scripts/build_client.py
 
       - name: Cleanup secrets

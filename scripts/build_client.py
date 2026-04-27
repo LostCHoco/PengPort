@@ -51,10 +51,12 @@ UPDATES_BASE_URL = os.environ.get(
 # 빌드 시 클라에 임베드되는 토큰 / Caddy 검증 토큰 키.
 UPDATES_TOKEN_ENV = "PENGPORT_UPDATES_TOKEN"
 
-# 자동 업로드 설정. 다른 instance 운영자가 fork 시 환경변수로 override 가능.
-# - PENGPORT_DEPLOY_SSH_HOST: ssh config 의 Host alias 또는 직접 host[:port]
-# - PENGPORT_DEPLOY_UPDATES_DIR: 원격 호스트의 caddy mount source 디렉토리 경로
-SSH_HOST = os.environ.get("PENGPORT_DEPLOY_SSH_HOST", "oracle")
+# 자동 업로드 설정.
+# - PENGPORT_DEPLOY_SSH_HOST: SCP 대상 ssh config alias. 비어있으면 upload skip.
+#   본격 release 는 GH Actions tag push (release.yml) 로만 — laptop 은 build-only.
+# - PENGPORT_DEPLOY_UPDATES_DIR: 원격 호스트의 caddy mount source 디렉토리 경로.
+#   pengport-updater user 의 home (`~`) 기준 — 격리된 sftp-only 계정.
+SSH_HOST = os.environ.get("PENGPORT_DEPLOY_SSH_HOST", "")
 REMOTE_UPDATES_DIR = os.environ.get("PENGPORT_DEPLOY_UPDATES_DIR", "~/updates")
 
 
@@ -118,25 +120,26 @@ def build_tauri(updates_token: str | None) -> Path:
 
 
 def upload_release(release_dir: Path) -> None:
-    """release_dir 의 파일들을 Oracle 의 ~/pengport-workspace/updates/ 로 SCP.
-    업로드 전 원격의 stale 산출물(이전 productName 등) 을 정리한다.
-    SSH_HOST 는 ~/.ssh/config 의 Host alias (`oracle`) 사용. 실패 시 예외 발생."""
+    """release_dir 의 파일들을 deploy host 의 updates/ 디렉토리로 SCP.
+
+    deploy 대상은 SFTP-only 격리 계정 (예: pengport-updater) — restrict + ForceCommand
+    internal-sftp 로 강제되어 있어 ssh shell / 임의 명령 실행 불가.
+    따라서 stale 정리도 SCP 로 새 파일을 업로드하면 동일 이름은 자연 덮어씌워지고,
+    이전 productName 잔재 등은 별도 명령(ssh) 으로 못 지우므로 사용자가 수동 정리.
+
+    SSH_HOST 가 비어있으면 upload 자체를 skip (laptop 의 build-only 모드)."""
+    if not SSH_HOST:
+        print("[skip] upload: PENGPORT_DEPLOY_SSH_HOST 환경변수 없음")
+        print("       laptop 에서는 build-only — release 는 GH Actions tag push 로만 진행")
+        return
+
     files = sorted(release_dir.iterdir())
     if not files:
         print(f"[skip] upload: {release_dir} 비어있음")
         return
 
-    # 원격 stale 정리: PengPort_*, latest.json, *.sig + 옛 productName 잔재까지.
-    # healthcheck.txt 같은 무관 파일은 보존.
-    cleanup_patterns = " ".join([
-        f"{REMOTE_UPDATES_DIR}/PengPort_*",
-        f"{REMOTE_UPDATES_DIR}/PengPort-Platform_*",  # 이전 productName 잔재
-        f"{REMOTE_UPDATES_DIR}/latest.json",
-    ])
-    print(f"$ ssh {SSH_HOST} 'rm -f {cleanup_patterns}'")
-    subprocess.run(["ssh", SSH_HOST, f"rm -f {cleanup_patterns}"], check=True)
-
     # SCP 는 single shot 으로 여러 파일 가능. 절대경로 보장.
+    # OpenSSH 9+ 의 scp 는 sftp protocol backend 로 작동 → ForceCommand internal-sftp 와 호환.
     cmd = ["scp", *[str(f) for f in files], f"{SSH_HOST}:{REMOTE_UPDATES_DIR}/"]
     print(f"$ {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
