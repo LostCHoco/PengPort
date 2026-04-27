@@ -1,0 +1,35 @@
+[package]
+name = "pengport"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PengPort - 펭돌서버 통합 런처"
+
+[lib]
+# Windows에서 bin과 lib 이름 충돌 방지용 _lib 접미사 (cargo#8519)
+name = "pengport_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+ureq = { workspace = true }
+zip = { workspace = true }
+
+# 공유 크레이트 (servers.toml 스키마/파서)
+pengport-shared = { path = "../../shared" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = { workspace = true }
+

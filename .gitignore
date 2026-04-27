@@ -1,0 +1,43 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Cargo.lock 은 애플리케이션(workspace members)이므로 커밋.
+# 라이브러리로 배포할 계획이 생기면 재검토.
+
+# Node / Tauri
+node_modules/
+dist/
+.npm/
+.vite/
+.eslintcache
+
+# 환경/시크릿
+.env
+.env.local
+# Tauri 업데이터 서명키 등 개인 자료
+.secrets/
+
+# Claude Code 사용자 사적 설정
+.claude/
+
+# Tauri 산출물 (커스텀 빌드 결과)
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+
+# 로그
+*.log
+logs/
+
+# 빌드 산출물
+client/
+

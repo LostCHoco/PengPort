@@ -1,0 +1,103 @@
+# [DEPRECATED] PSP 단방향 마이그레이션 (2026-04-27) 으로 이 파일은 코드에서 더 이상 참조되지 않습니다.
+# 참조: docs/guide/psp-migration.md
+#
+# 새 형식: servers/event-broadcaster/services.d/*.toml (PSP catalog) +
+#          servers/event-broadcaster/docker-compose.yml 의 adapter-minecraft 환경변수
+#
+# 이 파일은 운영 인스턴스 마이그레이션 시 packwiz_url / host / port / version / loader 등 참조용으로만 보존.
+# 마이그레이션 완료 후 삭제 가능.
+#
+# ============================================================
+# 이하 레거시 schema_v1 — 새 코드는 사용하지 않음
+# ============================================================
+
+schema_version = "1"
+
+[meta]
+# packwiz repo의 Pages 베이스 URL. 각 서버의 pack.toml은 {base}/{packwiz.path}/pack.toml 로 결정됩니다.
+pack_cdn_base = "https://lostchoco.github.io/minecraft-pengdoll-server"
+
+# 런처 self-update가 확인할 GitHub Releases 경로 (owner/repo)
+launcher_release_repo = "LostCHoco/minecraft-pengdoll-server"
+
+# 이벤트 브로드캐스터 SSE endpoint. 접속/퇴장 이벤트 실시간 수신.
+# 토큰은 내부 친구 그룹용 공유 토큰 — 장기적으로는 OAuth 등으로 개인화 예정.
+events_url = "https://pengdoll.duckdns.org/events"
+events_token = "25e2a6992b2ac2f2882bcc4a06d95de683f602cd3482e85e414e81805e1270b3"
+
+
+# ============================================================
+# Modded Survival (Fabric 1.21.1)
+# ============================================================
+[[servers]]
+id = "modded"
+name = "알파펭"
+enabled = true
+
+  [servers.connect]
+  host = "pengdoll.duckdns.org"
+  port = 25566
+
+  [servers.minecraft]
+  version = "1.21.1"
+  loader = "fabric"
+  loader_version = "0.18.4"
+  java_major = 21
+
+  [servers.packwiz]
+  path = "modded"                    # CDN에서 /modded/pack.toml 로 fetch
+
+  [servers.server]                   # Docker 컨테이너 구성용
+  image_type = "FABRIC"
+  memory = "6G"
+
+  [servers.policy]                   # 공통 정책
+  difficulty = "hard"
+  mode = "survival"
+  pvp = false
+  max_players = 4
+  motd = "첫번째 펭돌 서버"
+  view_distance = 10
+  simulation_distance = 6
+
+
+# ============================================================
+# RLCraft (Forge 1.12.2) - 신규
+# ============================================================
+[[servers]]
+id = "rlcraft"
+name = "RL펭"
+enabled = true
+
+  [servers.connect]
+  host = "pengdoll.duckdns.org"
+  port = 25565                       # 기존 바닐라 포트 재사용 예정
+
+  [servers.minecraft]
+  version = "1.12.2"
+  loader = "forge"
+  loader_version = "14.23.5.2860"    # RLCraft 공식 권장 버전, 실제 버전은 Task #2에서 재확인
+  java_major = 8
+
+  [servers.packwiz]
+  path = "rlcraft"
+
+  [servers.server]
+  image_type = "FORGE"
+  memory = "8G"
+
+  [servers.policy]
+  difficulty = "hard"
+  mode = "survival"
+  pvp = false
+  max_players = 4
+  motd = "RLCraft 서버"
+  view_distance = 6                  # 1.12.2 + 무거운 모드팩이라 낮게
+  simulation_distance = 6
+
+  # server.properties 추가 오버라이드 (itzg/minecraft-server 환경변수 직접 매핑).
+  # policy로 표현 안 되는 설정만 이곳에 둡니다.
+  [servers.server_properties]
+  ALLOW_FLIGHT = "TRUE"              # RLCraft 필수: 비행 mount, fairy ring 등이 킥 안 당하려면
+  MAX_TICK_TIME = "-1"               # RLCraft 필수: 큰 구조물 생성 시 Forge가 crash로 오인하지 않도록
+  ENABLE_COMMAND_BLOCK = "TRUE"      # RLCraft 필수: 생성된 구조물 내 villager spawn에 필요

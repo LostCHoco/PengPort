@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""
+build_client.py — PengPort 배포 번들 빌드.
+
+산출물:
+1) Portable zip   (`client/build/PengPort-{version}.zip`)
+     PengPort.exe                # Tauri release 바이너리
+     README.txt                      # 간단 안내
+2) Release assets (`client/build/release-{version}/`)
+     PengPort_{X.Y.Z}_x64-setup.exe     # NSIS installer (자동 업데이트용)
+     PengPort_{X.Y.Z}_x64-setup.exe.sig # minisign 서명
+     latest.json                            # Tauri updater manifest
+                                            # url → https://pengdoll.duckdns.org/updates/...
+
+PrismLauncher 는 더 이상 번들링하지 않는다. PengPort 가 첫 실행 시 시스템에 설치된
+Prism 을 자동 탐색하며, 못 찾으면 OOBE 에서 안내한다 (Phase 3 에서 자동 다운로드 추가 예정).
+
+사용:
+    python scripts/build_client.py [--version v3]
+
+전제:
+- Rust toolchain + npm 설치되어 있어야 함
+- `.secrets/pengport-updater.key` 가 있으면 자동 서명 (`.sig` 생성)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+import zipfile
+
+ROOT = Path(__file__).resolve().parents[1]
+TAURI_CONF = ROOT / "player-launcher" / "src-tauri" / "tauri.conf.json"
+
+# Windows 의 npm 은 .cmd 파일이므로 subprocess 가 찾도록 확장자 명시.
+NPM = "npm.cmd" if sys.platform == "win32" else "npm"
+
+# Self-hosted update endpoint. installer/sig/latest.json 모두 같은 디렉터리에 배치.
+# Caddy 가 Bearer 토큰 검증 후 정적 서빙.
+UPDATES_BASE_URL = "https://pengdoll.duckdns.org/updates"
+
+# 빌드 시 클라에 임베드되는 토큰 / Caddy 검증 토큰 키.
+UPDATES_TOKEN_ENV = "PENGPORT_UPDATES_TOKEN"
+
+# Oracle 자동 업로드 설정.
+SSH_HOST = "oracle"  # ~/.ssh/config 의 Host alias
+REMOTE_UPDATES_DIR = "~/pengport-workspace/updates"
+
+
+def read_tauri_conf() -> dict:
+    return json.loads(TAURI_CONF.read_text(encoding="utf-8"))
+
+
+def fetch_updates_token() -> str | None:
+    """빌드 시 임베드할 업데이트 토큰을 가져온다.
+
+    **기본값: None (임베드 안 함)**. 친구 배포용 installer 가 토큰을 포함하지 않게
+    하기 위함 — installer 유출 시에도 토큰 안전.
+
+    환경변수 PENGPORT_UPDATES_TOKEN 이 명시되어야만 임베드. (사용자 본인용 빠른 빌드용.)
+    토큰 없이 빌드된 installer 는 첫 실행 시 OOBE 에서 사용자가 토큰을 직접 입력함."""
+    import os
+
+    token = os.environ.get(UPDATES_TOKEN_ENV)
+    return token.strip() if token else None
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> None:
+    print(f"$ {' '.join(str(c) for c in cmd)}  (cwd={cwd or ROOT})")
+    subprocess.run(cmd, cwd=cwd or ROOT, check=True)
+
+
+def build_tauri(updates_token: str | None) -> Path:
+    """Tauri release 빌드 실행 (NSIS installer + 서명 포함). 결과 exe 경로 반환.
+    - 서명 키가 `.secrets/pengport-updater.key` 에 있으면 자동으로 서명 (.sig 생성).
+    - updates_token 이 주어지면 PENGPORT_UPDATES_TOKEN env var 로 주입돼
+      Rust 의 `option_env!` 로 임베드된다 (build.rs 에 rerun-if-env-changed 등록됨)."""
+    import os
+
+    env = os.environ.copy()
+    key_path = ROOT / ".secrets" / "pengport-updater.key"
+    if key_path.exists():
+        env["TAURI_SIGNING_PRIVATE_KEY"] = key_path.read_text(encoding="utf-8").strip()
+        env["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = ""  # 비밀번호 없는 키
+        print(f"[signing] private key loaded from {key_path}")
+    else:
+        print(f"[signing] no key at {key_path} — unsigned build (NSIS .sig 생성 안됨)")
+
+    if updates_token:
+        env[UPDATES_TOKEN_ENV] = updates_token
+        masked = f"{updates_token[:6]}...{updates_token[-4:]}"
+        print(f"[token] embedded UPDATES_TOKEN = {masked}")
+    else:
+        # 임베드 없이 빌드되면 사용자가 Settings 에서 토큰 입력해야 첫 업데이트 가능.
+        env.pop(UPDATES_TOKEN_ENV, None)
+        print(f"[token] no {UPDATES_TOKEN_ENV} → 사용자가 Settings 에서 직접 입력해야 함")
+
+    run_env([NPM, "install"], cwd=ROOT / "player-launcher", env=env)
+    # NSIS 만 빌드 (updater 는 NSIS 기반). MSI 는 필요 시 별도 target 로 추가.
+    run_env([NPM, "run", "tauri", "build", "--", "--bundles", "nsis"],
+            cwd=ROOT / "player-launcher", env=env)
+    # Cargo crate 이름이 'pengport' 이라 산출물도 같은 이름.
+    exe = ROOT / "target" / "release" / "pengport.exe"
+    if not exe.exists():
+        raise FileNotFoundError(f"Tauri 빌드 산출물을 찾을 수 없습니다: {exe}")
+    return exe
+
+
+def upload_release(release_dir: Path) -> None:
+    """release_dir 의 파일들을 Oracle 의 ~/pengport-workspace/updates/ 로 SCP.
+    업로드 전 원격의 stale 산출물(이전 productName 등) 을 정리한다.
+    SSH_HOST 는 ~/.ssh/config 의 Host alias (`oracle`) 사용. 실패 시 예외 발생."""
+    files = sorted(release_dir.iterdir())
+    if not files:
+        print(f"[skip] upload: {release_dir} 비어있음")
+        return
+
+    # 원격 stale 정리: PengPort_*, latest.json, *.sig + 옛 productName 잔재까지.
+    # healthcheck.txt 같은 무관 파일은 보존.
+    cleanup_patterns = " ".join([
+        f"{REMOTE_UPDATES_DIR}/PengPort_*",
+        f"{REMOTE_UPDATES_DIR}/PengPort-Platform_*",  # 이전 productName 잔재
+        f"{REMOTE_UPDATES_DIR}/latest.json",
+    ])
+    print(f"$ ssh {SSH_HOST} 'rm -f {cleanup_patterns}'")
+    subprocess.run(["ssh", SSH_HOST, f"rm -f {cleanup_patterns}"], check=True)
+
+    # SCP 는 single shot 으로 여러 파일 가능. 절대경로 보장.
+    cmd = ["scp", *[str(f) for f in files], f"{SSH_HOST}:{REMOTE_UPDATES_DIR}/"]
+    print(f"$ {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    print(f"[OK] uploaded {len(files)} files to {SSH_HOST}:{REMOTE_UPDATES_DIR}/")
+
+
+def collect_release_assets(release_dir: Path, app_version: str) -> tuple[Path, Path]:
+    """현재 tauri.conf.json 의 (productName, version) 조합으로 정확한 NSIS 산출물을
+    찾아 release 디렉터리로 복사. 이전 빌드 잔재가 NSIS 폴더에 남아있어도 정확한
+    파일을 매칭하므로 안전.
+    (installer_out, sig_out) 반환."""
+    nsis_dir = ROOT / "target" / "release" / "bundle" / "nsis"
+    if not nsis_dir.exists():
+        raise FileNotFoundError(f"NSIS 빌드 디렉터리 없음: {nsis_dir}")
+
+    # Tauri NSIS 산출물 명명 규칙: `<productName>_<version>_x64-setup.exe`
+    product_name = read_tauri_conf()["productName"]
+    installer_src = nsis_dir / f"{product_name}_{app_version}_x64-setup.exe"
+    if not installer_src.is_file():
+        # 실패 시 같은 폴더의 다른 산출물 목록도 함께 보여 디버깅 도움.
+        siblings = sorted(nsis_dir.glob("*_x64-setup.exe"))
+        raise FileNotFoundError(
+            f"NSIS installer 없음: {installer_src.name}\n"
+            f"NSIS 폴더의 산출물: {[p.name for p in siblings]}\n"
+            f"→ Tauri 빌드가 정상 완료됐는지, productName/version 이 일치하는지 확인."
+        )
+    # Tauri 는 `<installer>.exe.sig` 형태로 서명 파일을 나란히 둠.
+    sig_src = installer_src.parent / (installer_src.name + ".sig")
+    if not sig_src.is_file():
+        raise FileNotFoundError(
+            f"서명 파일 없음: {sig_src}\n"
+            "→ `.secrets/pengport-updater.key` 가 있는지 확인하세요."
+        )
+
+    # 깨끗한 release_dir 로 시작 (이전 빌드의 다른 이름 산출물이 SCP 로 함께 올라가는 것 방지).
+    if release_dir.exists():
+        shutil.rmtree(release_dir)
+    release_dir.mkdir(parents=True)
+    installer_out = release_dir / installer_src.name
+    sig_out = release_dir / sig_src.name
+    shutil.copy2(installer_src, installer_out)
+    shutil.copy2(sig_src, sig_out)
+    return installer_out, sig_out
+
+
+def write_latest_json(release_dir: Path, installer: Path, sig: Path, app_version: str) -> Path:
+    """Tauri updater 가 읽는 manifest 생성.
+    endpoints (tauri.conf.json) 는 `latest.json` 을 가리키고,
+    여기 포함된 url 로 클라가 installer 를 받음. URL 인코딩이 필요한 문자는
+    한 번에 quote 처리 (파일명에 공백 등 들어가도 안전)."""
+    from urllib.parse import quote
+
+    signature = sig.read_text(encoding="utf-8").strip()
+    asset_url = f"{UPDATES_BASE_URL}/{quote(installer.name)}"
+    manifest = {
+        "version": app_version,
+        "notes": f"PengPort v{app_version}",
+        "pub_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "platforms": {
+            "windows-x86_64": {
+                "signature": signature,
+                "url": asset_url,
+            },
+        },
+    }
+    out = release_dir / "latest.json"
+    out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+def run_env(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> None:
+    print(f"$ {' '.join(str(c) for c in cmd)}  (cwd={cwd or ROOT})")
+    subprocess.run(cmd, cwd=cwd or ROOT, check=True, env=env)
+
+
+def stage_bundle(staging: Path, exe: Path, readme: str) -> None:
+    """staging 폴더에 최종 배포 구조를 구성. (PengPort.exe + README 만)
+    PrismLauncher 는 런타임에 시스템에서 탐색하거나 OOBE 로 다운로드함."""
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+
+    # Tauri exe → 사용자에게 보이는 이름으로 복사
+    shutil.copy2(exe, staging / "PengPort.exe")
+
+    # README
+    (staging / "README.txt").write_text(readme, encoding="utf-8")
+
+
+def zip_staging(staging: Path, out: Path) -> Path:
+    """주어진 path 로 zip 생성. 실제 작성된 path 반환.
+
+    Windows 에서 기존 zip 이 Defender 스캔/Explorer 미리보기/Bandizip 등에
+    의해 짧게 잠기는 경우가 있어, unlink 가 실패하면 짧은 backoff 로 재시도한다.
+    그래도 안 풀리면 timestamp 가 붙은 새 이름으로 작성해 워크플로우를 막지 않는다."""
+    import time
+
+    if out.exists():
+        # 0.3s × 8회 = 약 2.4s 까지 대기 (Defender 짧은 스캔이면 충분)
+        for attempt in range(8):
+            try:
+                out.unlink()
+                break
+            except PermissionError:
+                if attempt < 7:
+                    time.sleep(0.3)
+                    continue
+                # 끝까지 잠금 해제 안 되면 timestamp 이름으로 fallback.
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                fallback = out.with_name(f"{out.stem}-{ts}{out.suffix}")
+                print(
+                    f"[WARN] 기존 {out.name} 의 잠금이 풀리지 않아 "
+                    f"{fallback.name} 으로 작성합니다.",
+                    file=sys.stderr,
+                )
+                out = fallback
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for path in staging.rglob("*"):
+            z.write(path, path.relative_to(staging))
+    return out
+
+
+README_TEMPLATE = """PengPort
+
+1. "PengPort.exe" 를 실행합니다.
+2. 처음 실행 시 PrismLauncher 를 자동으로 찾습니다.
+   - PrismLauncher 가 없다면 https://prismlauncher.org 에서 설치 후 다시 실행하세요.
+   - (추후 업데이트로 자동 다운로드 기능이 추가될 예정입니다.)
+3. 서버 목록에서 Play 버튼을 누르면 자동으로 인스턴스를 준비합니다.
+4. 이후 최신 모드/설정은 실행할 때마다 자동 동기화됩니다.
+
+업데이트는 자동으로 확인되며, 새 버전이 있으면 [설정] 에서 설치할 수 있습니다.
+"""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--version", default="v3", help="Portable zip 라벨 (배포 세대 구분용)")
+    ap.add_argument("--skip-build", action="store_true", help="Tauri 빌드 생략 (기존 산출물 재사용)")
+    ap.add_argument("--skip-release", action="store_true",
+                    help="NSIS installer / latest.json 생성 생략 (portable zip 만)")
+    ap.add_argument("--no-upload", action="store_true",
+                    help="release assets 의 Oracle 자동 SCP 업로드 생략")
+    args = ap.parse_args()
+
+    # Tauri 의 실제 앱 버전은 tauri.conf.json 의 version 필드가 출처.
+    app_version = read_tauri_conf()["version"]
+
+    # 빌드 임베드용 토큰 (env > get-secret > None).
+    updates_token = fetch_updates_token()
+
+    out_dir = ROOT / "client" / "build"
+    staging = out_dir / f"staging-{args.version}"
+    zip_path = out_dir / f"PengPort-{args.version}.zip"
+    release_dir = out_dir / f"release-{args.version}"
+
+    exe = (
+        ROOT / "target" / "release" / "pengport.exe"
+        if args.skip_build
+        else build_tauri(updates_token)
+    )
+    if not exe.exists():
+        print(f"[FAIL] 빌드 산출물 없음: {exe}", file=sys.stderr)
+        return 1
+
+    # 1) Portable zip (PengPort.exe + README, 최초 배포용)
+    stage_bundle(staging, exe, README_TEMPLATE)
+    zip_path = zip_staging(staging, zip_path)  # 잠금 시 timestamp 이름으로 fallback 가능
+    size_mb = zip_path.stat().st_size / (1024 * 1024)
+    print(f"\n[OK] portable zip: {zip_path} ({size_mb:.1f} MB)")
+
+    # 2) Release assets (자동 업데이트용)
+    if args.skip_release:
+        print("[skip] release assets (--skip-release)")
+        return 0
+
+    try:
+        installer, sig = collect_release_assets(release_dir, app_version)
+    except FileNotFoundError as e:
+        print(f"[WARN] release assets 수집 실패: {e}", file=sys.stderr)
+        print("       portable zip 만 생성됨. 자동 업데이트 배포는 불가.", file=sys.stderr)
+        return 0
+
+    manifest = write_latest_json(release_dir, installer, sig, app_version)
+    inst_mb = installer.stat().st_size / (1024 * 1024)
+    print(f"[OK] NSIS installer: {installer} ({inst_mb:.1f} MB)")
+    print(f"[OK] signature:      {sig}")
+    print(f"[OK] latest.json:    {manifest}")
+
+    # 3) Oracle 자동 업로드
+    if args.no_upload:
+        print("[skip] upload (--no-upload). 수동 업로드:")
+        print(f"  scp {release_dir}/* {SSH_HOST}:{REMOTE_UPDATES_DIR}/")
+    else:
+        try:
+            upload_release(release_dir)
+            print(f"\n[DONE] 자동 업데이트 배포 완료. endpoint: {UPDATES_BASE_URL}/latest.json")
+        except subprocess.CalledProcessError as e:
+            print(f"[WARN] 업로드 실패 (exit {e.returncode}). 수동 업로드 필요.", file=sys.stderr)
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

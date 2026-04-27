@@ -1,0 +1,49 @@
+[package]
+name = "pengport-adapter-minecraft"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PengPort PSP 어댑터 — Minecraft 서버 (Docker logs + RCON) → PSP service endpoints (manifest/status/events)"
+
+[[bin]]
+name = "adapter-minecraft"
+path = "src/main.rs"
+
+[dependencies]
+pengport-shared = { path = "../shared" }
+
+# 비동기 런타임
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+
+# HTTP 서버
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Docker Engine API (컨테이너 로그 tail)
+bollard = "0.19"
+
+# 직렬화
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# 로그 파싱
+regex = "1"
+
+# 오류 처리
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# 관찰성
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# RCON 클라이언트 (Minecraft list 명령)
+rcon = { version = "0.6", features = ["rt-tokio"] }
+
+# Constant-time 토큰 비교 (timing attack 방어)
+subtle = "2"
