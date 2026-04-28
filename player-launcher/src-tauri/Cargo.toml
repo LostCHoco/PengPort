@@ -28,7 +28,10 @@ ureq = { workspace = true }
 zip = { workspace = true }
 # OS native secret store (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 # instance_token / updater_token 등 user session 보호 단위로 격리. master password 불필요.
-keyring = "3"
+#
+# v3 부터 backend feature 를 명시해야 함 — default 는 in-memory mock 이라
+# set_password 가 Ok 응답하지만 process 종료 시 휘발 (디버깅 함정).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 # 공유 크레이트 (servers.toml 스키마/파서)
 pengport-shared = { path = "../../shared" }

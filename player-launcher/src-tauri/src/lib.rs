@@ -2,9 +2,23 @@ mod commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Updater plugin 의 Authorization 헤더 — Caddy /updates/* Bearer 보호.
+    // current_token() 은 keyring 우선, 없으면 빌드 임베드 (PENGPORT_UPDATES_TOKEN).
+    // 빈 문자열이면 헤더 추가 없이 빌드 (build).
+    let updater_token = commands::updater::current_token();
+    let mut updater_builder = tauri_plugin_updater::Builder::new();
+    if !updater_token.is_empty() {
+        updater_builder = updater_builder
+            .header(
+                "Authorization",
+                format!("Bearer {updater_token}"),
+            )
+            .expect("invalid Authorization header value");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(updater_builder.build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
