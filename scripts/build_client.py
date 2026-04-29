@@ -47,15 +47,13 @@ TAURI_CONF = ROOT / "player-launcher" / "src-tauri" / "tauri.conf.json"
 NPM = "npm.cmd" if sys.platform == "win32" else "npm"
 
 # Self-hosted update endpoint. installer/sig/latest.json 모두 같은 디렉터리에 배치.
-# Caddy 가 Bearer 토큰 검증 후 정적 서빙.
+# Caddy 가 file_server 로 정적 서빙 (public — PSP 정신상 client 는 software,
+# instance-agnostic 이라 누구나 다운로드. instance 접근만 EVENTS_TOKEN 으로 보호).
 # instance 별로 도메인이 다르므로 환경변수 override 가능 (GH Actions / 다른 instance fork).
 UPDATES_BASE_URL = os.environ.get(
     "PENGPORT_UPDATES_BASE_URL",
     "https://pengdoll.duckdns.org/updates",
 )
-
-# 빌드 시 클라에 임베드되는 토큰 / Caddy 검증 토큰 키.
-UPDATES_TOKEN_ENV = "PENGPORT_UPDATES_TOKEN"
 
 # 자동 업로드 설정.
 # - PENGPORT_DEPLOY_SSH_HOST: SCP 대상 ssh config alias. 비어있으면 upload skip.
@@ -70,32 +68,14 @@ def read_tauri_conf() -> dict:
     return json.loads(TAURI_CONF.read_text(encoding="utf-8"))
 
 
-def fetch_updates_token() -> str | None:
-    """빌드 시 임베드할 업데이트 토큰을 가져온다.
-
-    **기본값: None (임베드 안 함)**. 친구 배포용 installer 가 토큰을 포함하지 않게
-    하기 위함 — installer 유출 시에도 토큰 안전.
-
-    환경변수 PENGPORT_UPDATES_TOKEN 이 명시되어야만 임베드. (사용자 본인용 빠른 빌드용.)
-    토큰 없이 빌드된 installer 는 첫 실행 시 OOBE 에서 사용자가 토큰을 직접 입력함."""
-    import os
-
-    token = os.environ.get(UPDATES_TOKEN_ENV)
-    return token.strip() if token else None
-
-
 def run(cmd: list[str], cwd: Path | None = None) -> None:
     print(f"$ {' '.join(str(c) for c in cmd)}  (cwd={cwd or ROOT})")
     subprocess.run(cmd, cwd=cwd or ROOT, check=True)
 
 
-def build_tauri(updates_token: str | None) -> Path:
+def build_tauri() -> Path:
     """Tauri release 빌드 실행 (NSIS installer + 서명 포함). 결과 exe 경로 반환.
-    - 서명 키가 `.secrets/pengport-updater.key` 에 있으면 자동으로 서명 (.sig 생성).
-    - updates_token 이 주어지면 PENGPORT_UPDATES_TOKEN env var 로 주입돼
-      Rust 의 `option_env!` 로 임베드된다 (build.rs 에 rerun-if-env-changed 등록됨)."""
-    import os
-
+    서명 키가 `.secrets/pengport-updater.key` 에 있으면 자동으로 서명 (.sig 생성)."""
     env = os.environ.copy()
     key_path = ROOT / ".secrets" / "pengport-updater.key"
     if key_path.exists():
@@ -104,15 +84,6 @@ def build_tauri(updates_token: str | None) -> Path:
         print(f"[signing] private key loaded from {key_path}")
     else:
         print(f"[signing] no key at {key_path} — unsigned build (NSIS .sig 생성 안됨)")
-
-    if updates_token:
-        env[UPDATES_TOKEN_ENV] = updates_token
-        masked = f"{updates_token[:6]}...{updates_token[-4:]}"
-        print(f"[token] embedded UPDATES_TOKEN = {masked}")
-    else:
-        # 임베드 없이 빌드되면 사용자가 Settings 에서 토큰 입력해야 첫 업데이트 가능.
-        env.pop(UPDATES_TOKEN_ENV, None)
-        print(f"[token] no {UPDATES_TOKEN_ENV} → 사용자가 Settings 에서 직접 입력해야 함")
 
     run_env([NPM, "install"], cwd=ROOT / "player-launcher", env=env)
     # NSIS 만 빌드 (updater 는 NSIS 기반). MSI 는 필요 시 별도 target 로 추가.
@@ -296,9 +267,6 @@ def main() -> int:
     # Tauri 의 실제 앱 버전은 tauri.conf.json 의 version 필드가 출처.
     app_version = read_tauri_conf()["version"]
 
-    # 빌드 임베드용 토큰 (env > get-secret > None).
-    updates_token = fetch_updates_token()
-
     out_dir = ROOT / "client" / "build"
     staging = out_dir / f"staging-{args.version}"
     zip_path = out_dir / f"PengPort-{args.version}.zip"
@@ -307,7 +275,7 @@ def main() -> int:
     exe = (
         ROOT / "target" / "release" / "pengport.exe"
         if args.skip_build
-        else build_tauri(updates_token)
+        else build_tauri()
     )
     if not exe.exists():
         print(f"[FAIL] 빌드 산출물 없음: {exe}", file=sys.stderr)

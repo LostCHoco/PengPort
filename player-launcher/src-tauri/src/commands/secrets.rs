@@ -4,8 +4,7 @@
 //! user session 단위로 보호되며 master password 불필요.
 //!
 //! 저장하는 시크릿 (account 이름):
-//! - `instance_token`: PSP instance 의 catalog/SSE bearer 토큰 (사용자별 instance 접근)
-//! - `updater_token`:  Caddy `/updates/*` Bearer 토큰 (auto-update endpoint 보호)
+//! - `instance_token:<id>`: PSP instance 의 catalog/SSE bearer 토큰 (instance 별 격리)
 
 use keyring::Entry;
 
@@ -42,42 +41,51 @@ fn clear(account: &str) -> Result<(), String> {
     }
 }
 
-// ----- 다른 module 에서 사용하는 typed API -----
-
-pub fn load_updater_token() -> Result<Option<String>, String> {
-    load("updater_token")
-}
-
-pub fn save_updater_token(token: &str) -> Result<(), String> {
-    save("updater_token", token)
-}
-
-pub fn clear_updater_token() -> Result<(), String> {
-    clear("updater_token")
-}
-
 // ----- Tauri commands (frontend 가 직접 호출) -----
 
-/// PSP instance 의 bearer 토큰을 keyring 에 저장.
-/// 빈 문자열이면 clear 동작.
+/// instance 별로 keyring account 이름 분리. multi-instance 모델에서 각 instance 의 token 격리.
+fn account_for_instance(instance_id: &str) -> String {
+    format!("instance_token:{instance_id}")
+}
+
+/// 특정 instance 의 bearer 토큰을 keyring 에 저장. 빈 문자열이면 clear.
 #[tauri::command]
-pub fn instance_token_save(token: String) -> Result<(), String> {
+pub fn instance_token_save(instance_id: String, token: String) -> Result<(), String> {
     let trimmed = token.trim();
+    let account = account_for_instance(&instance_id);
     if trimmed.is_empty() {
-        clear("instance_token")
+        clear(&account)
     } else {
-        save("instance_token", trimmed)
+        save(&account, trimmed)
     }
 }
 
-/// keyring 에서 instance 토큰 조회 (없으면 null).
+/// 특정 instance 의 keyring 토큰 조회 (없으면 null).
 #[tauri::command]
-pub fn instance_token_load() -> Result<Option<String>, String> {
-    load("instance_token")
+pub fn instance_token_load(instance_id: String) -> Result<Option<String>, String> {
+    load(&account_for_instance(&instance_id))
 }
 
-/// keyring 에서 instance 토큰 삭제 (logout 등).
+/// 특정 instance 의 keyring 토큰 삭제 (logout, remove 등).
 #[tauri::command]
-pub fn instance_token_clear() -> Result<(), String> {
-    clear("instance_token")
+pub fn instance_token_clear(instance_id: String) -> Result<(), String> {
+    clear(&account_for_instance(&instance_id))
+}
+
+/// 단일 instance 모델 시절의 keyring entry ('instance_token') 를 새 instance_id 로 옮김.
+/// PspLibrary 의 instance list 마이그레이션과 짝 — frontend 가 옛 'pengport.instance_url' 을
+/// 새 instance entry 로 변환할 때 이 command 를 같이 호출.
+/// 옛 entry 없으면 false. 있고 옮겨지면 true.
+#[tauri::command]
+pub fn instance_token_migrate_legacy(new_instance_id: String) -> Result<bool, String> {
+    let legacy_account = "instance_token";
+    match load(legacy_account)? {
+        None => Ok(false),
+        Some(token) => {
+            let new_account = account_for_instance(&new_instance_id);
+            save(&new_account, &token)?;
+            clear(legacy_account)?;
+            Ok(true)
+        }
+    }
 }

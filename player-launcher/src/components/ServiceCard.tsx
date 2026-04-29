@@ -53,15 +53,25 @@ export function ServiceCard({
   const displayName = hintName ?? manifest.name;
   const iconUrl = hintIcon ?? manifest.icon_url;
 
-  // Status polling — visibility 기반.
+  // Status: SSE (manifest.endpoints.events) 가 있으면 push 모델 — adapter 가 join/leave
+  // 같은 변화를 즉시 보냄. SSE 가 연결될 때 adapter 가 초기 status 도 함께 푸시하므로
+  // 별도 첫 fetch 불필요. SSE 가 없거나 끊기면 polling fallback (5분 간격).
+  //
+  // EventSource 는 표준 API 의 한계로 Authorization 헤더 송신 불가 — adapter 의
+  // events_handler 는 `?token=<EVENTS_TOKEN>` query 인증을 지원해서 그 길로 보냄.
   useEffect(() => {
     let cancelled = false;
+    let es: EventSource | null = null;
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    const fetchStatus = async () => {
+    const fetchStatusOnce = async () => {
       try {
         const headers: HeadersInit = { Accept: "application/json" };
         if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
-        const resp = await fetch(manifest.endpoints.status, { headers });
+        const resp = await fetch(manifest.endpoints.status, {
+          headers,
+          cache: "no-store",
+        });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = (await resp.json()) as StatusResponse;
         if (!cancelled) setStatusState({ kind: "ok", status: data });
@@ -70,22 +80,52 @@ export function ServiceCard({
       }
     };
 
-    fetchStatus();
-    const timer = setInterval(fetchStatus, STATUS_POLL_INTERVAL_MS);
+    const eventsUrl = manifest.endpoints.events;
+    if (eventsUrl) {
+      const url = bearerToken
+        ? `${eventsUrl}?token=${encodeURIComponent(bearerToken)}`
+        : eventsUrl;
+      es = new EventSource(url);
+      es.addEventListener("status_changed", (e) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse((e as MessageEvent).data) as StatusResponse;
+          setStatusState({ kind: "ok", status: data });
+        } catch (err) {
+          console.warn("[ServiceCard] SSE parse error", err);
+        }
+      });
+      es.onerror = () => {
+        // EventSource 가 자동 재연결 시도. 첫 연결 실패 시점엔 화면이 비어있을 수
+        // 있으므로 1회 polling 으로 fallback. 끊겼다 다시 붙으면 SSE 재연결이 push 하는
+        // status_changed 가 갱신.
+        if (!cancelled && statusState.kind === "loading") {
+          void fetchStatusOnce();
+        }
+      };
+    } else {
+      // events endpoint 가 없는 service — polling 모델
+      void fetchStatusOnce();
+      pollTimer = setInterval(fetchStatusOnce, STATUS_POLL_INTERVAL_MS);
+    }
 
+    // SSE 든 polling 든, focus / visibility 변화 시 한 번 더 fetch (네트워크 sleep 회복).
+    const refreshOnFocus = () => void fetchStatusOnce();
     const handleVisible = () => {
-      if (document.visibilityState === "visible") fetchStatus();
+      if (document.visibilityState === "visible") refreshOnFocus();
     };
     document.addEventListener("visibilitychange", handleVisible);
-    window.addEventListener("focus", fetchStatus);
+    window.addEventListener("focus", refreshOnFocus);
 
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (es) es.close();
+      if (pollTimer) clearInterval(pollTimer);
       document.removeEventListener("visibilitychange", handleVisible);
-      window.removeEventListener("focus", fetchStatus);
+      window.removeEventListener("focus", refreshOnFocus);
     };
-  }, [manifest.endpoints.status, bearerToken]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manifest.endpoints.events, manifest.endpoints.status, bearerToken]);
 
   const primaryAction = manifest.actions.find((a) => a.primary);
   const secondaryActions = manifest.actions.filter((a) => a !== primaryAction);

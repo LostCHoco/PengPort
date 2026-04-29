@@ -1,14 +1,17 @@
-// PSP 라이브러리 (메인 페이지).
+// PSP 라이브러리 (메인 페이지) — multi-instance 모델.
 //
 // 흐름:
-// 1. 저장된 instance URL/token 이 없으면 OOBE — `<InstanceSetup>` 폼 표시
-// 2. 있으면 instance metadata + catalog fetch → 각 service 의 manifest fetch
+// 1. 등록된 instance 가 없으면 OOBE — `<InstanceSetup>` 폼 표시
+// 2. active instance 가 있으면 metadata + catalog fetch → 각 service 의 manifest fetch
 // 3. ServiceCard 렌더링 (status polling, action 버튼)
 // 4. NeedsConfirm 받으면 ConsentDialog → 동의 후 invoke 재시도
 //
-// 영속화:
-// - instance URL: localStorage (시크릿 아님, identifier)
-// - instance bearer token: OS keychain (`@/lib/secrets`) — 평문 디스크 차단
+// 영속화 (lib/instances.ts + lib/secrets.ts):
+// - instance list / active id : localStorage (시크릿 아님)
+// - 각 instance 의 bearer token: OS keychain (instance.id 별 격리)
+//
+// active instance 전환은 사이드바 (App.tsx) 가 처리. 이 컴포넌트는 useInstances()
+// 의 active 가 바뀌면 자동으로 다시 catalog 로드.
 
 import { useCallback, useEffect, useState } from "react";
 import { ConsentDialog, type ConsentRequest } from "@/components/ConsentDialog";
@@ -30,25 +33,8 @@ import {
   type ServiceManifest,
   type ServicesCatalog,
 } from "@/lib/psp";
-import { instanceToken, loadInstanceTokenWithMigration } from "@/lib/secrets";
-
-// ====== 영속화 ======
-
-const LS_INSTANCE_URL = "pengport.instance_url";
-
-function loadInstanceUrl(): string | null {
-  return localStorage.getItem(LS_INSTANCE_URL);
-}
-
-async function saveInstance(url: string, token: string | null): Promise<void> {
-  localStorage.setItem(LS_INSTANCE_URL, url);
-  await instanceToken.save(token ?? "");
-}
-
-async function clearInstance(): Promise<void> {
-  localStorage.removeItem(LS_INSTANCE_URL);
-  await instanceToken.clear();
-}
+import { useInstances } from "@/lib/instances-context";
+import { instanceToken } from "@/lib/secrets";
 
 // ====== 컴포넌트 상태 ======
 
@@ -59,14 +45,15 @@ interface ServiceState {
 
 type LoadState =
   | { kind: "needs_setup" }
-  | { kind: "loading" }
+  | { kind: "loading"; instanceId: string }
   | {
       kind: "ready";
+      instanceId: string;
       instance: InstanceMetadata;
       services: ServiceState[];
       bearerToken: string | null;
     }
-  | { kind: "error"; message: string; instanceUrl: string };
+  | { kind: "error"; instanceId: string; instanceUrl: string; message: string };
 
 interface PendingAction {
   service: ServiceState;
@@ -79,6 +66,7 @@ interface ToastState {
 }
 
 export default function PspLibrary() {
+  const { active, remove, updateName } = useInstances();
   const [state, setState] = useState<LoadState>({ kind: "needs_setup" });
   const [invokingActionId, setInvokingActionId] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -89,9 +77,11 @@ export default function PspLibrary() {
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const loadFromInstance = useCallback(
-    async (instanceUrl: string, bearerToken: string | null) => {
-      setState({ kind: "loading" });
+    async (instanceId: string, instanceUrl: string) => {
+      setState({ kind: "loading", instanceId });
       try {
+        const bearerToken = await instanceToken.load(instanceId);
+
         const instance =
           instanceCache.get(instanceUrl) ??
           (await pspLoadInstance(instanceUrl));
@@ -119,47 +109,61 @@ export default function PspLibrary() {
         }
         setState({
           kind: "ready",
+          instanceId,
           instance,
           services: manifests,
           bearerToken,
         });
       } catch (e) {
-        setState({ kind: "error", message: String(e), instanceUrl });
+        setState({
+          kind: "error",
+          instanceId,
+          instanceUrl,
+          message: String(e),
+        });
       }
     },
     [],
   );
 
-  // 마운트 시 저장된 instance 로드 시도. token 은 keyring 에서 (legacy localStorage 자동 마이그레이션).
+  // active instance 가 바뀔 때마다 reload.
+  // 의존성은 id/url primitive 만 (active object 자체는 매 render 새 reference 라
+  // useEffect 무한 루프 유발 — instance list 변경 → active 재계산 → 재 fetch → ...).
+  const activeIdDep = active?.id ?? null;
+  const activeUrlDep = active?.url ?? null;
   useEffect(() => {
-    const url = loadInstanceUrl();
-    if (!url) {
+    if (!activeIdDep || !activeUrlDep) {
       setState({ kind: "needs_setup" });
       return;
     }
-    void (async () => {
-      const token = await loadInstanceTokenWithMigration();
-      await loadFromInstance(url, token);
-    })();
-  }, [loadFromInstance]);
+    void loadFromInstance(activeIdDep, activeUrlDep);
+  }, [activeIdDep, activeUrlDep, loadFromInstance]);
 
-  const handleSetupSubmit = useCallback(
-    async (url: string, token: string) => {
-      await saveInstance(url, token || null);
-      await loadFromInstance(url, token || null);
-    },
-    [loadFromInstance],
-  );
+  // catalog 로드 성공 시 instance metadata 의 name 을 사이드바 표시용으로 자동 채움.
+  // useEffect 분리: loadFromInstance 안에서 직접 호출하면 updateName → instances state 변경
+  // → active 재생성 → useEffect 재실행 의 무한 루프. ready state 에서만 idempotent 호출.
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const current = active;
+    if (current && current.id === state.instanceId) {
+      const newName = state.instance.name;
+      if (newName && current.name !== newName) {
+        updateName(current.id, newName);
+      }
+    }
+  }, [state, active, updateName]);
 
-  const handleClearInstance = useCallback(() => {
+  const handleRemoveActive = useCallback(() => {
+    if (!active) return;
     void (async () => {
-      await clearInstance();
+      // active instance 만 제거. context 가 다른 instance 또는 null 로 active 변경.
+      // catalog/manifest cache 도 정리 (URL 기반이라 다른 instance 영향 없지만 깔끔하게).
       instanceCache.clear();
       catalogCache.clear();
       manifestCache.clear();
-      setState({ kind: "needs_setup" });
+      await remove(active.id);
     })();
-  }, []);
+  }, [active, remove]);
 
   // ====== Action invoke ======
 
@@ -260,9 +264,7 @@ export default function PspLibrary() {
 
   return (
     <div className="p-8">
-      {state.kind === "needs_setup" && (
-        <InstanceSetup onSubmit={handleSetupSubmit} />
-      )}
+      {state.kind === "needs_setup" && <InstanceSetup />}
 
       {state.kind === "loading" && (
         <p className="text-sm text-neutral-400">인스턴스 정보 불러오는 중...</p>
@@ -279,17 +281,12 @@ export default function PspLibrary() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() =>
-                void (async () => {
-                  const token = await loadInstanceTokenWithMigration();
-                  await loadFromInstance(state.instanceUrl, token);
-                })()
-              }
+              onClick={() => void loadFromInstance(state.instanceId, state.instanceUrl)}
             >
               다시 시도
             </Button>
-            <Button size="sm" variant="outline" onClick={handleClearInstance}>
-              인스턴스 변경
+            <Button size="sm" variant="outline" onClick={handleRemoveActive}>
+              인스턴스 제거
             </Button>
           </div>
         </div>
@@ -302,11 +299,12 @@ export default function PspLibrary() {
               <h2 className="text-2xl font-semibold">{state.instance.name}</h2>
               <p className="mt-1 text-xs text-neutral-500">
                 {state.instance.operator.name}
-                {state.instance.description && ` · ${state.instance.description}`}
+                {state.instance.description &&
+                  ` · ${state.instance.description}`}
               </p>
             </div>
-            <Button size="sm" variant="outline" onClick={handleClearInstance}>
-              인스턴스 변경
+            <Button size="sm" variant="outline" onClick={handleRemoveActive}>
+              인스턴스 제거
             </Button>
           </header>
 
@@ -356,12 +354,12 @@ export default function PspLibrary() {
 }
 
 // ====== OOBE: 인스턴스 추가 form ======
+//
+// instance 가 하나도 없을 때 (또는 사용자가 사이드바의 "인스턴스 추가" 클릭 시) 표시.
+// add → keyring 에 token 저장 → context 가 active 로 설정 → useEffect 가 자동 reload.
 
-function InstanceSetup({
-  onSubmit,
-}: {
-  onSubmit: (url: string, token: string) => Promise<void>;
-}) {
+export function InstanceSetup() {
+  const { add } = useInstances();
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -371,7 +369,18 @@ function InstanceSetup({
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(url.trim(), token.trim());
+      const trimmedUrl = url.trim();
+      const trimmedToken = token.trim();
+      if (!trimmedUrl) {
+        setError("URL 이 비어있습니다.");
+        setSubmitting(false);
+        return;
+      }
+      const entry = add({ url: trimmedUrl });
+      if (trimmedToken) {
+        await instanceToken.save(entry.id, trimmedToken);
+      }
+      // context 가 active 변경을 감지 → PspLibrary 가 자동 catalog 로드
     } catch (e) {
       setError(String(e));
     } finally {
@@ -381,7 +390,7 @@ function InstanceSetup({
 
   return (
     <div className="mx-auto max-w-lg space-y-4 rounded-lg border border-sky-900/50 bg-sky-900/15 p-6">
-      <h2 className="text-lg font-semibold text-sky-100">PengPort 사용 시작</h2>
+      <h2 className="text-lg font-semibold text-sky-100">인스턴스 추가</h2>
       <p className="text-sm text-sky-200/90">
         연결할 PengPort 인스턴스의 URL 을 입력하세요. 운영자가 알려준 도메인입니다
         (예: <code>https://pengdoll.duckdns.org</code>).
@@ -416,12 +425,8 @@ function InstanceSetup({
 
       {error && <p className="text-xs text-red-300">실패: {error}</p>}
 
-      <Button
-        size="sm"
-        onClick={handle}
-        disabled={submitting || !url.trim()}
-      >
-        {submitting ? "연결 중..." : "연결"}
+      <Button size="sm" onClick={handle} disabled={submitting || !url.trim()}>
+        {submitting ? "추가 중..." : "추가"}
       </Button>
     </div>
   );

@@ -2,23 +2,9 @@ mod commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Updater plugin 의 Authorization 헤더 — Caddy /updates/* Bearer 보호.
-    // current_token() 은 keyring 우선, 없으면 빌드 임베드 (PENGPORT_UPDATES_TOKEN).
-    // 빈 문자열이면 헤더 추가 없이 빌드 (build).
-    let updater_token = commands::updater::current_token();
-    let mut updater_builder = tauri_plugin_updater::Builder::new();
-    if !updater_token.is_empty() {
-        updater_builder = updater_builder
-            .header(
-                "Authorization",
-                format!("Bearer {updater_token}"),
-            )
-            .expect("invalid Authorization header value");
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(updater_builder.build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -28,15 +14,11 @@ pub fn run() {
             commands::prism::set_prism_override,
             commands::prism::remove_bundled_prism,
             commands::prism::stop_server,
-            // updater
-            commands::updater::get_update_token,
-            commands::updater::set_update_token,
-            commands::updater::update_token_source,
-            commands::updater::validate_update_token,
-            // secrets (OS keychain — instance_token)
+            // secrets (OS keychain — instance_token, multi-instance 별 격리)
             commands::secrets::instance_token_save,
             commands::secrets::instance_token_load,
             commands::secrets::instance_token_clear,
+            commands::secrets::instance_token_migrate_legacy,
             // PSP
             commands::psp::psp_load_instance,
             commands::psp::psp_load_manifest,

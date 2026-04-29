@@ -13,7 +13,6 @@ name: Release
 # 필요 GH Secrets (Settings → Secrets and variables → Actions):
 #   - TAURI_SIGNING_PRIVATE_KEY        : minisign 서명 키 (.secrets/pengport-updater.key 내용)
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 서명 키 password (현재 빈 값)
-#   - PENGPORT_UPDATES_TOKEN           : 빌드 시 client 에 임베드되는 update auth 토큰
 #   - ORACLE_SSH_PRIVATE_KEY           : SFTP 인증용 private key (pengport-updater 의 authorized_keys 와 짝)
 #   - ORACLE_KNOWN_HOSTS               : ssh-keyscan 결과 (MITM 방지)
 #   - ORACLE_HOST                      : oracle 의 hostname (예: pengdoll.duckdns.org)
@@ -100,7 +99,6 @@ jobs:
       - name: Build and deploy (build_client.py)
         shell: bash
         env:
-          PENGPORT_UPDATES_TOKEN: ${{ secrets.PENGPORT_UPDATES_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # build_client.py 가 SSH_HOST 가 비어있지 않을 때만 SCP. workflow 에서 활성화.
           PENGPORT_DEPLOY_SSH_HOST: oracle

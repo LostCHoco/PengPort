@@ -4,6 +4,8 @@ import { createHashRouter, RouterProvider } from "react-router";
 import App from "./App";
 import PspLibrary from "./pages/PspLibrary";
 import Settings from "./pages/Settings";
+import ThirdPartyApps from "./pages/ThirdPartyApps";
+import { InstancesProvider } from "./lib/instances-context";
 import "./index.css";
 
 const router = createHashRouter([
@@ -12,6 +14,7 @@ const router = createHashRouter([
     Component: App,
     children: [
       { index: true, Component: PspLibrary },
+      { path: "third-party", Component: ThirdPartyApps },
       { path: "settings", Component: Settings },
     ],
   },
@@ -19,6 +22,8 @@ const router = createHashRouter([
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <InstancesProvider>
+      <RouterProvider router={router} />
+    </InstancesProvider>
   </React.StrictMode>,
 );
