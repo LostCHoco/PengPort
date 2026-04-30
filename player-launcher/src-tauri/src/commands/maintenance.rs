@@ -165,6 +165,10 @@ fn keyring_clear(account: &str) -> Result<bool, String> {
 /// 옛 productName ("PengdollPark") 의 uninstaller 도 등록되어 있으면 같이 spawn — 사용자가
 /// "완전 삭제" 의도로 호출했으니 모든 흔적 정리.
 ///
+/// 추가로: NSIS 는 install path (Program Files\PengPort) 만 정리하고 user data
+/// (%LOCALAPPDATA%\PengPort\EBWebView 등) 는 보존하므로, background batch 로 ALL_FS_IDENTIFIERS
+/// 의 user data 폴더들을 PengPort 종료 직후 자동 정리.
+///
 /// Windows 외 플랫폼에서는 미지원.
 #[tauri::command]
 pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
@@ -183,8 +187,10 @@ pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
         if !spawned_any {
             return Err("uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string());
         }
-        // 짧은 grace period 후 자체 종료. NSIS 가 우리를 끝나기를 기다리지 않고 lock 충돌이 날 수 있어
-        // 명시적 exit. 호출자(frontend)는 이 함수가 사실상 반환하지 않는다고 가정.
+        // user data 폴더들을 5초 후 background 정리 — PengPort 종료 + webview2 자식 process 의
+        // lock 풀릴 시간 확보. NSIS 의 Program Files 정리와 별개.
+        schedule_userdata_cleanup_windows();
+        // 짧은 grace period 후 자체 종료.
         let app_for_exit = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -198,6 +204,33 @@ pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
         let _ = app;
         Err("Windows 외 OS 미지원".to_string())
     }
+}
+
+/// PengPort 종료 후 5초 뒤 user data 폴더들을 정리하는 background cmd batch.
+/// detached + no-window 로 spawn 후 PengPort exit. webview2 자식 process 가 종료될 시간을
+/// 주기 위해 timeout. 각 rd 는 best-effort (lock 잡힌 항목 있으면 skip).
+#[cfg(windows)]
+fn schedule_userdata_cleanup_windows() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let appdata = std::env::var_os("APPDATA").unwrap_or_default();
+    let localappdata = std::env::var_os("LOCALAPPDATA").unwrap_or_default();
+
+    let mut parts: Vec<String> = vec!["timeout /t 5 /nobreak > nul".to_string()];
+    for id in paths::ALL_FS_IDENTIFIERS {
+        let p1 = PathBuf::from(&appdata).join(id);
+        let p2 = PathBuf::from(&localappdata).join(id);
+        parts.push(format!("rd /s /q \"{}\" 2>nul", p1.display()));
+        parts.push(format!("rd /s /q \"{}\" 2>nul", p2.display()));
+    }
+    let cmd = parts.join(" & ");
+
+    let _ = std::process::Command::new("cmd")
+        .args(["/c", &cmd])
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn();
 }
 
 #[cfg(windows)]
