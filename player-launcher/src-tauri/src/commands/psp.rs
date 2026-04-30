@@ -149,6 +149,15 @@ pub enum ActionOutcome {
         /// 사용자에게 보여줄 컨텍스트 (host, port, packwiz_url, version, install_hint 등).
         details: serde_json::Value,
     },
+    /// third_party app 이 시스템에 없음. frontend 가 inline 동의 dialog → 자동 다운로드 →
+    /// 동일 invoke 재시도. 사용자가 의도적으로 설치하는 흐름이라 페이지 이동 없이 처리.
+    ThirdPartyMissing {
+        /// 어느 third-party app 이 필요한지 (예: `"prism-launcher"`).
+        app_id: String,
+        /// manifest 가 명시한 install hint (`{name, homepage?}` 또는 null).
+        /// frontend 가 dialog 의 안내 문구에 활용.
+        install_hint: serde_json::Value,
+    },
 }
 
 /// Action dispatch + OS 호출.
@@ -274,8 +283,18 @@ async fn invoke_third_party(
     }
 
     // trusted → 인스턴스 sync + Prism spawn.
+    // prism 미설치 시 별도 outcome 으로 빠짐 (frontend 가 inline 설치 dialog).
+    let prism_paths = match super::prism::prism_paths() {
+        Ok((_, p)) => p,
+        Err(_) => {
+            return Ok(ActionOutcome::ThirdPartyMissing {
+                app_id: intent.app_id.clone(),
+                install_hint: serde_json::to_value(&intent.install_hint)
+                    .unwrap_or(serde_json::Value::Null),
+            });
+        }
+    };
     let jar = super::prism::ensure_bootstrap_jar(app)?;
-    let (_, prism_paths) = super::prism::prism_paths()?;
 
     let instance_id_for_sync = instance_id.clone();
     let config_for_sync = config.clone();

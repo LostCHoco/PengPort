@@ -9,7 +9,7 @@
 // invoke 책임은 부모 (PspLibrary) — confirm 재시도 / outcome 분기 / 에러 표시 등이
 // 한 곳에 모이도록. 이 카드는 status 표시 + action 클릭 콜백만.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import type {
   Badge as PspBadge,
@@ -36,6 +36,8 @@ interface Props {
   onAction: (action: ServiceAction) => void;
   /** 부모가 알리는 invoke 진행 중 action id (해당 버튼 비활성). null = idle. */
   invokingActionId?: string | null;
+  /** "Prism 인스턴스 삭제" 메뉴 — 부모가 confirm + Rust command 호출. 미지정이면 메뉴 자체 안 보임. */
+  onRemoveInstance?: () => void;
 }
 
 const STATUS_POLL_INTERVAL_MS = 30_000;
@@ -47,8 +49,10 @@ export function ServiceCard({
   hintIcon,
   onAction,
   invokingActionId = null,
+  onRemoveInstance,
 }: Props) {
   const [statusState, setStatusState] = useState<StatusState>({ kind: "loading" });
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const displayName = hintName ?? manifest.name;
   const iconUrl = hintIcon ?? manifest.icon_url;
@@ -153,7 +157,17 @@ export function ServiceCard({
             )}
           </div>
         </div>
-        <ServiceStatusBadge state={statusState} />
+        <div className="flex items-center gap-1.5">
+          <ServiceStatusBadge state={statusState} />
+          {onRemoveInstance && (
+            <CardMenu
+              open={menuOpen}
+              onOpenChange={setMenuOpen}
+              onRemoveInstance={onRemoveInstance}
+              displayName={displayName}
+            />
+          )}
+        </div>
       </div>
 
       {manifest.description && (
@@ -358,5 +372,92 @@ function Spinner() {
       className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent"
       aria-label="실행 중"
     />
+  );
+}
+
+// ============================================================
+// 카드 우상단 [⋮] 메뉴 — 현재는 "Prism 인스턴스 삭제" 만.
+// 자체 popover (base-ui Menu 미사용) — 항목 1개라 단순 구현.
+// ============================================================
+function CardMenu({
+  open,
+  onOpenChange,
+  onRemoveInstance,
+  displayName,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onRemoveInstance: () => void;
+  displayName: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  // 바깥 클릭 / ESC 닫기
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        onOpenChange(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onOpenChange(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onOpenChange]);
+
+  const handleRemove = () => {
+    onOpenChange(false);
+    const ok = confirm(
+      `${displayName} 의 Prism 인스턴스 폴더를 삭제할까요?\n\n` +
+        `Minecraft 의 saves/, mods/, config/ 등이 모두 사라집니다.\n` +
+        `다시 실행하면 PengPort 가 인스턴스를 재생성합니다 (saves 는 복구 불가).`,
+    );
+    if (ok) onRemoveInstance();
+  };
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        aria-label="더보기"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => onOpenChange(!open)}
+        className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-neutral-500 transition-colors hover:bg-neutral-800/60 hover:text-neutral-200"
+      >
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          aria-hidden
+        >
+          <circle cx="5" cy="12" r="1.6" />
+          <circle cx="12" cy="12" r="1.6" />
+          <circle cx="19" cy="12" r="1.6" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-10 mt-1 w-56 overflow-hidden rounded-md border border-neutral-700 bg-neutral-900 py-1 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={handleRemove}
+            className="flex w-full cursor-pointer items-center px-3 py-1.5 text-left text-xs text-red-300 transition-colors hover:bg-red-950/50"
+          >
+            Prism 인스턴스 삭제
+          </button>
+        </div>
+      )}
+    </div>
   );
 }

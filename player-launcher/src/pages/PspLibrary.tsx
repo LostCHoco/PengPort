@@ -15,8 +15,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ConsentDialog, type ConsentRequest } from "@/components/ConsentDialog";
+import {
+  ThirdPartyInstallDialog,
+  type InstallRequest,
+} from "@/components/ThirdPartyInstallDialog";
 import { ServiceCard } from "@/components/ServiceCard";
 import { Button } from "@/components/ui/button";
+import { removePrismInstance } from "@/lib/api";
 import {
   catalogCache,
   instanceCache,
@@ -74,6 +79,10 @@ export default function PspLibrary() {
     pending: PendingAction;
   } | null>(null);
   const [confirmProcessing, setConfirmProcessing] = useState(false);
+  const [pendingInstall, setPendingInstall] = useState<{
+    request: InstallRequest;
+    pending: PendingAction;
+  } | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   const loadFromInstance = useCallback(
@@ -207,6 +216,15 @@ export default function PspLibrary() {
             pending: { service, action },
           });
           return;
+        case "third_party_missing":
+          setPendingInstall({
+            request: {
+              app_id: outcome.app_id,
+              install_hint: outcome.install_hint,
+            },
+            pending: { service, action },
+          });
+          return;
       }
     },
     [],
@@ -259,6 +277,53 @@ export default function PspLibrary() {
   const handleDenyConfirm = useCallback(() => {
     setPendingConfirm(null);
   }, []);
+
+  // ThirdPartyInstallDialog: 사용자가 자동 설치 완료한 후 원래 action 재시도.
+  // 같은 흐름 안에서 ThirdPartyMissing 이 또 떨어지면 (드물지만 가능) dialog 재오픈.
+  const handleThirdPartyInstalled = useCallback(
+    async (_req: InstallRequest) => {
+      if (!pendingInstall) return;
+      const { service, action } = pendingInstall.pending;
+      setPendingInstall(null);
+      try {
+        const retry = await invoke(service, action);
+        if (retry.kind === "third_party_missing") {
+          setPendingInstall({
+            request: {
+              app_id: retry.app_id,
+              install_hint: retry.install_hint,
+            },
+            pending: { service, action },
+          });
+        } else {
+          handleOutcome(action, service, retry);
+        }
+      } catch (e) {
+        setToast({ kind: "error", message: String(e) });
+      }
+    },
+    [pendingInstall, invoke, handleOutcome],
+  );
+
+  const handleThirdPartyCancel = useCallback(() => {
+    setPendingInstall(null);
+  }, []);
+
+  // ServiceCard 의 "Prism 인스턴스 삭제" 메뉴 — confirm 없이 호출 (카드가 자체 confirm 처리).
+  const handleRemoveServiceInstance = useCallback(
+    async (service: ServiceState) => {
+      try {
+        await removePrismInstance(service.entry.id);
+        setToast({
+          kind: "info",
+          message: `${service.manifest.name} 의 Prism 인스턴스 폴더 삭제 완료`,
+        });
+      } catch (e) {
+        setToast({ kind: "error", message: `삭제 실패: ${e}` });
+      }
+    },
+    [],
+  );
 
   // ====== 렌더 ======
 
@@ -321,6 +386,9 @@ export default function PspLibrary() {
                     hintIcon={entry.hint?.icon}
                     onAction={handleAction({ entry, manifest })}
                     invokingActionId={invokingActionId}
+                    onRemoveInstance={() =>
+                      void handleRemoveServiceInstance({ entry, manifest })
+                    }
                   />
                 </li>
               ))}
@@ -334,6 +402,12 @@ export default function PspLibrary() {
         onAllow={handleAllowConfirm}
         onDeny={handleDenyConfirm}
         processing={confirmProcessing}
+      />
+
+      <ThirdPartyInstallDialog
+        request={pendingInstall?.request ?? null}
+        onInstalled={handleThirdPartyInstalled}
+        onCancel={handleThirdPartyCancel}
       />
 
       {toast && (

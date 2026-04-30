@@ -29,6 +29,10 @@ pub fn run() {
             commands::psp::psp_trust,
             commands::psp::psp_revoke_trust,
             commands::psp::psp_list_trusts,
+            // 데이터 정리/언인스톨
+            commands::maintenance::wipe_all_data,
+            commands::maintenance::remove_prism_instance,
+            commands::maintenance::uninstall_self,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

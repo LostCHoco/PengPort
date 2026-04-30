@@ -228,6 +228,12 @@ export type InstanceEvent =
 // ActionOutcome (Tauri command 응답)
 // ============================================================
 
+/** manifest 의 install_hint. */
+export interface InstallHintDto {
+  name: string;
+  homepage?: string;
+}
+
 /** `psp_invoke_action` 의 응답. */
 export type ActionOutcome =
   | { kind: "done" }
@@ -240,6 +246,11 @@ export type ActionOutcome =
       display: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       details: any;
+    }
+  | {
+      kind: "third_party_missing";
+      app_id: string;
+      install_hint: InstallHintDto | null;
     };
 
 // ============================================================

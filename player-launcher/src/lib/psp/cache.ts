@@ -42,6 +42,20 @@ export class TtlCache<K, V> {
   clear() {
     this.map.clear();
   }
+
+  /** TTL 만료 안 된 값들. 순서는 insertion order. */
+  values(): V[] {
+    const now = Date.now();
+    const out: V[] = [];
+    for (const [k, e] of this.map) {
+      if (now - e.fetchedAt > this.ttlMs) {
+        this.map.delete(k);
+        continue;
+      }
+      out.push(e.data);
+    }
+    return out;
+  }
 }
 
 /** Service manifest 캐시 — 5 분. 갱신은 invalidate 또는 TTL 만료 후. */

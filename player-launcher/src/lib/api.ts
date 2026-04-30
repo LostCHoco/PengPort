@@ -59,3 +59,44 @@ export async function removeBundledPrism(): Promise<PrismLocation | null> {
 export async function stopServer(serverId: string): Promise<void> {
   return await invoke<void>("stop_server", { serverId });
 }
+
+// ============================================================
+// 데이터 정리/언인스톨 (위험 작업 — frontend 에서 사용자 confirm 후 호출)
+// ============================================================
+
+/** PengPort 가 만든 Prism 인스턴스 폴더 1개 삭제. */
+export async function removePrismInstance(instanceId: string): Promise<void> {
+  return await invoke<void>("remove_prism_instance", { instanceId });
+}
+
+export interface WipeReport {
+  keyring_cleared: number;
+  paths_removed: string[];
+  failures: string[];
+}
+
+/**
+ * PengPort 가 만든 모든 native state 초기화.
+ * - keyring 의 instance_token:* (req.instance_ids)
+ * - PengPort 가 만든 Prism 인스턴스들 (req.prism_instance_ids)
+ * - app_data_root 의 trust.json / prism_settings.toml
+ * - app_cache_root 의 bundled prism / bootstrap jar
+ *
+ * 호출 후 frontend 가 localStorage 도 정리해야 한다 (이 함수는 native 만 담당).
+ */
+export async function wipeAllData(req: {
+  instanceIds: string[];
+  prismInstanceIds: string[];
+}): Promise<WipeReport> {
+  return await invoke<WipeReport>("wipe_all_data", {
+    req: {
+      instance_ids: req.instanceIds,
+      prism_instance_ids: req.prismInstanceIds,
+    },
+  });
+}
+
+/** Windows NSIS uninstaller 실행 + 자체 종료. 반환 안 됨. */
+export async function uninstallSelf(): Promise<void> {
+  return await invoke<void>("uninstall_self");
+}
