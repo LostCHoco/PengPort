@@ -3,11 +3,16 @@ import { NavLink, Outlet, useNavigate } from "react-router";
 import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate } from "@/lib/updater";
 import { useInstances } from "@/lib/instances-context";
+import {
+  UpdatePromptDialog,
+  type UpdatePromptInfo,
+} from "@/components/UpdatePromptDialog";
 
 const LS_LIBRARY_EXPANDED = "pengport.sidebar.library_expanded";
 
 export default function App() {
   const [version, setVersion] = useState<string>("");
+  const [updatePrompt, setUpdatePrompt] = useState<UpdatePromptInfo | null>(null);
   const { instances, activeId, active, setActive } = useInstances();
   const navigate = useNavigate();
   // "라이브러리" 그룹은 헤더 클릭으로 접었다 펼 수 있는 collapsible. 페이지 이동은 안 하고
@@ -29,22 +34,23 @@ export default function App() {
     getVersion().then(setVersion).catch(() => setVersion(""));
   }, []);
 
-  // 앱 기동 시 업데이트 자동 적용.
-  // 새 버전 있으면 silent 로 다운로드 + minisign 서명 검증 + 설치 + 자동 재기동.
-  // Prism / 게임은 별도 process 라 PengPort 재기동에 영향 없음.
-  // 실패는 console.warn 만 (사용자 방해 없이 다음 기동 시 재시도).
+  // 앱 기동 시 업데이트 체크 — 새 버전 있으면 dialog 띄워 사용자 동의 받음.
+  // silent auto-install 안 함 (0.1.3 부터 정책 변경): 사용자 모르는 사이 재시작이 어색.
+  // "다음에" 누르면 그 세션 동안만 닫힘 — 다음 launch 에 다시 묻음.
   useEffect(() => {
     (async () => {
       try {
         const info = await checkForUpdate();
-        if (info.available && info.install) {
-          console.info(
-            `[updater] auto-installing ${info.version} (current ${info.currentVersion})`,
-          );
-          await info.install();
+        if (info.available && info.install && info.version) {
+          setUpdatePrompt({
+            version: info.version,
+            currentVersion: info.currentVersion,
+            body: info.body,
+            install: info.install,
+          });
         }
       } catch (e) {
-        console.warn("[updater] auto-update failed:", e);
+        console.warn("[updater] check failed:", e);
       }
     })();
   }, []);
@@ -130,6 +136,11 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         <Outlet />
       </main>
+
+      <UpdatePromptDialog
+        info={updatePrompt}
+        onDismiss={() => setUpdatePrompt(null)}
+      />
     </div>
   );
 }

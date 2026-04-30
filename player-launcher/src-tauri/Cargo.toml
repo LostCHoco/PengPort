@@ -12,6 +12,13 @@ description = "PengPort - 펭돌서버 통합 런처"
 name = "pengport_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 0.1.3 부터 binary 파일명을 PengPort.exe (대문자) 로. Cargo package name 은
+# 소문자 식별자로 그대로 두고 [[bin]] name 만 변경 — Tauri 의 NSIS installer 가
+# 이 binary 를 그대로 묶어서 Program Files\PengPort\PengPort.exe 로 설치.
+[[bin]]
+name = "PengPort"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

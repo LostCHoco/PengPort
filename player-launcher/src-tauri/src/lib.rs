@@ -2,6 +2,10 @@ mod commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 0.1.3 부터 사용자 데이터 폴더가 `app.pengport` → `PengPort` 로 변경됨.
+    // Tauri webview 가 user data dir 에 lock 잡기 전에 옛 폴더를 새 이름으로 rename.
+    commands::paths::migrate_legacy_app_dirs();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())

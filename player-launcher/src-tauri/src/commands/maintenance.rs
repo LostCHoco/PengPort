@@ -118,35 +118,23 @@ pub async fn wipe_all_data(req: WipeRequest) -> Result<WipeReport, String> {
         }
     }
 
-    // 3) app_data_root 의 PengPort 자체 파일들.
-    if let Some(root) = paths::app_data_root() {
-        for fname in ["trust.json", "prism_settings.toml"] {
-            let p = root.join(fname);
-            if p.exists() {
-                match std::fs::remove_file(&p) {
-                    Ok(()) => report.paths_removed.push(p),
-                    Err(e) => report.failures.push(format!("{fname}: {e}")),
+    // 3) PengPort 의 모든 옛/현 식별자가 만든 사용자 폴더 통째로 삭제.
+    //    %APPDATA%/<id>/ 와 %LOCALAPPDATA%/<id>/ 두 곳 × ALL_FS_IDENTIFIERS.
+    //    포함되는 데이터: trust.json, prism_settings.toml, WebView2 EBWebView (localStorage
+    //    /IndexedDB/Cookies), bundled prism, bootstrap jar 등 PengPort 가 만든 것 전부.
+    let appdata = std::env::var_os("APPDATA");
+    let localappdata = std::env::var_os("LOCALAPPDATA");
+    for id in paths::ALL_FS_IDENTIFIERS {
+        for root_var in [&appdata, &localappdata] {
+            let Some(root) = root_var else { continue };
+            let dir = PathBuf::from(root).join(id);
+            if dir.exists() {
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(()) => report.paths_removed.push(dir),
+                    Err(e) => report
+                        .failures
+                        .push(format!("{}: {e}", dir.display())),
                 }
-            }
-        }
-    }
-
-    // 4) app_cache_root: bundled prism + bootstrap jar.
-    if let Some(cache) = paths::app_cache_root() {
-        let bundled = cache.join("prism");
-        if bundled.exists() {
-            match std::fs::remove_dir_all(&bundled) {
-                Ok(()) => report.paths_removed.push(bundled),
-                Err(e) => report
-                    .failures
-                    .push(format!("bundled prism: {e}")),
-            }
-        }
-        let jar = cache.join("packwiz-installer-bootstrap.jar");
-        if jar.exists() {
-            match std::fs::remove_file(&jar) {
-                Ok(()) => report.paths_removed.push(jar),
-                Err(e) => report.failures.push(format!("bootstrap jar: {e}")),
             }
         }
     }
@@ -170,18 +158,31 @@ fn keyring_clear(account: &str) -> Result<bool, String> {
 // uninstall_self — Windows NSIS uninstaller 실행 + 자체 종료
 // ---------------------------------------------------------------------------
 
-/// Windows: 레지스트리의 `Uninstall\<DisplayName>` 에서 `UninstallString` 을 찾아 실행하고
+/// Windows: 레지스트리의 `Uninstall\<ProductName>` 에서 `UninstallString` 을 찾아 실행하고
 /// 자체 종료한다. NSIS uninstaller 가 PengPort.exe 를 lock 한 상태이면 실패하므로 우리는
 /// detached 로 spawn 후 즉시 종료.
+///
+/// 옛 productName ("PengdollPark") 의 uninstaller 도 등록되어 있으면 같이 spawn — 사용자가
+/// "완전 삭제" 의도로 호출했으니 모든 흔적 정리.
 ///
 /// Windows 외 플랫폼에서는 미지원.
 #[tauri::command]
 pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let unins = locate_uninstaller_windows()
-            .ok_or_else(|| "uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string())?;
-        spawn_uninstaller_windows(&unins)?;
+        let mut spawned_any = false;
+        for product in paths::ALL_PRODUCT_NAMES {
+            if let Some(unins) = locate_uninstaller_windows(product) {
+                if let Err(e) = spawn_uninstaller_windows(&unins) {
+                    eprintln!("uninstaller spawn 실패 ({}): {e}", product);
+                } else {
+                    spawned_any = true;
+                }
+            }
+        }
+        if !spawned_any {
+            return Err("uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string());
+        }
         // 짧은 grace period 후 자체 종료. NSIS 가 우리를 끝나기를 기다리지 않고 lock 충돌이 날 수 있어
         // 명시적 exit. 호출자(frontend)는 이 함수가 사실상 반환하지 않는다고 가정.
         let app_for_exit = app.clone();
@@ -200,21 +201,33 @@ pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn locate_uninstaller_windows() -> Option<PathBuf> {
+fn locate_uninstaller_windows(product: &str) -> Option<PathBuf> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
     use winreg::RegKey;
 
-    // tauri NSIS 의 ProductName 은 tauri.conf.json 의 productName ("PengPort").
     let candidates = [
-        (HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PengPort"),
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PengPort"),
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\PengPort"),
+        (
+            HKEY_CURRENT_USER,
+            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            format!(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
+        ),
     ];
 
     for (hive, subkey) in candidates {
         let root = RegKey::predef(hive);
-        let Ok(key) = root.open_subkey_with_flags(subkey, KEY_READ) else { continue };
-        let Ok(s): Result<String, _> = key.get_value("UninstallString") else { continue };
+        let Ok(key) = root.open_subkey_with_flags(&subkey, KEY_READ) else {
+            continue;
+        };
+        let Ok(s): Result<String, _> = key.get_value("UninstallString") else {
+            continue;
+        };
         // UninstallString 은 보통 따옴표 포함된 절대 경로. trim + 따옴표 제거.
         let trimmed = s.trim().trim_matches('"');
         let path = PathBuf::from(trimmed);
