@@ -24,6 +24,17 @@ import {
   setActiveInstanceId as persistActiveId,
   updateInstanceName as updateNameLs,
 } from "./instances";
+import { catalogCache, instanceCache, manifestCache } from "./psp";
+
+// 인스턴스 추가/제거 시 PSP 메모리 cache 를 모두 비운다.
+// 그렇지 않으면 같은 URL 의 instance 를 [제거] 한 직후 다시 [추가] 했을 때, 5분 TTL 안의
+// cached catalog/manifest 가 그대로 hit 되어 새 토큰 없이도 service 가 표시되는 false-positive
+// 가 발생한다 (서버는 401 반환하지만 fetch 자체가 안 일어남).
+function invalidatePspCaches() {
+  instanceCache.clear();
+  catalogCache.clear();
+  manifestCache.clear();
+}
 
 interface InstancesContextValue {
   instances: InstanceEntry[];
@@ -65,6 +76,8 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
 
   const add = useCallback(
     (input: { url: string; name?: string }) => {
+      // 옛 cached catalog/manifest 가 token 없이 reuse 되는 false-positive 방지.
+      invalidatePspCaches();
       const entry = addInstanceLs(input);
       refresh();
       return entry;
@@ -75,6 +88,8 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
   const remove = useCallback(
     async (id: string) => {
       await removeInstanceLs(id);
+      // 같은 URL 로 다시 추가했을 때 옛 cache 가 hit 되어 token 없이 작동하는 버그 방지.
+      invalidatePspCaches();
       refresh();
     },
     [refresh],

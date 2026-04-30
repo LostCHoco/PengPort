@@ -32,18 +32,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify tag version matches tauri.conf.json
+      - name: Verify version alignment (tag ≡ tauri.conf.json ≡ Cargo.toml)
         shell: bash
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
+          # 세 값을 모두 일치시켜야 한다.
+          # - tag                : GH Releases / 버전 식별용
+          # - tauri.conf.json    : NSIS installer 의 ProductVersion + latest.json 의 version
+          # - Cargo.toml         : binary 의 CARGO_PKG_VERSION (= tauri 의 getVersion() / updater 의
+          #                       self-version 비교 기준). 한쪽만 bump 하면 0.1.0 → 0.1.1 update
+          #                       후에도 self-version 이 0.1.0 그대로라 무한 update 루프 발생.
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           CONF_VERSION=$(jq -r .version player-launcher/src-tauri/tauri.conf.json)
+          CARGO_VERSION=$(awk -F'"' '/^version\s*=/{print $2; exit}' Cargo.toml)
+          ok=true
           if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
-            echo "✗ Tag v$TAG_VERSION 과 tauri.conf.json 의 version $CONF_VERSION 가 일치하지 않습니다."
-            echo "  → tauri.conf.json 의 version 을 bump 한 commit 후 같은 version 의 tag 를 push 하세요."
+            echo "✗ tauri.conf.json version ($CONF_VERSION) ≠ tag ($TAG_VERSION)"
+            ok=false
+          fi
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "✗ Cargo.toml workspace.package.version ($CARGO_VERSION) ≠ tag ($TAG_VERSION)"
+            ok=false
+          fi
+          if ! $ok; then
+            echo
+            echo "→ 두 파일 모두 같은 version 으로 bump 한 commit 후 같은 version 의 tag 를 push 하세요."
             exit 1
           fi
-          echo "✓ Tag v$TAG_VERSION ≡ tauri.conf.json"
+          echo "✓ tag = tauri.conf = Cargo.toml = $TAG_VERSION"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
