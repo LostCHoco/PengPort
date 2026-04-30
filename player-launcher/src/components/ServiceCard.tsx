@@ -10,7 +10,9 @@
 // 한 곳에 모이도록. 이 카드는 status 표시 + action 클릭 콜백만.
 
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
+import { isPrismInstanceInstalled, isServiceRunning, stopServer } from "@/lib/api";
 import type {
   Badge as PspBadge,
   Metric,
@@ -27,6 +29,8 @@ type StatusState =
 
 interface Props {
   manifest: ServiceManifest;
+  /** PSP service id — Prism instance dir name 과 동일. running / installed 검사용. */
+  serviceId: string;
   /** Authorization header 용 (없으면 미전송). status 와 action 양쪽 사용. */
   bearerToken?: string;
   /** Catalog hint (manifest 보다 우선 표시할 이름/아이콘 — 보통은 manifest 사용). */
@@ -36,26 +40,117 @@ interface Props {
   onAction: (action: ServiceAction) => void;
   /** 부모가 알리는 invoke 진행 중 action id (해당 버튼 비활성). null = idle. */
   invokingActionId?: string | null;
-  /** "Prism 인스턴스 삭제" 메뉴 — 부모가 confirm + Rust command 호출. 미지정이면 메뉴 자체 안 보임. */
-  onRemoveInstance?: () => void;
+  /** "앱 제거" 메뉴 — Rust command 호출이 끝나면 resolve. 카드가 후속 state 갱신.
+   * 미지정이면 메뉴 자체 안 보임. */
+  onRemoveInstance?: () => Promise<void>;
+  /** 부모(PspLibrary) 가 1회 detect_prism 후 모든 카드에 전달. third-party 미설치 badge 분기. */
+  prismInstalled?: boolean;
 }
 
 const STATUS_POLL_INTERVAL_MS = 30_000;
 
 export function ServiceCard({
   manifest,
+  serviceId,
   bearerToken,
   hintName,
   hintIcon,
   onAction,
   invokingActionId = null,
   onRemoveInstance,
+  prismInstalled,
 }: Props) {
   const [statusState, setStatusState] = useState<StatusState>({ kind: "loading" });
   const [menuOpen, setMenuOpen] = useState(false);
+  // phase — idle (미실행) / preparing (Prism spawn 완료, 모드팩 다운로드/Mojang 인증)
+  // / running (Prism 의 자식으로 minecraft 클라이언트 process 가 등장 = 게임 본체 떠 있음).
+  // backend 가 'minecraft:started' event 로 알려줌.
+  const [phase, setPhase] = useState<"idle" | "preparing" | "running">("idle");
+  const [instanceInstalled, setInstanceInstalled] = useState<boolean | null>(null);
+  const [stopping, setStopping] = useState<boolean>(false);
+
+  const running = phase === "running" || phase === "preparing"; // 종료 버튼 활성 등 호환
 
   const displayName = hintName ?? manifest.name;
   const iconUrl = hintIcon ?? manifest.icon_url;
+
+  // 실행 상태 — 초기 1회 fetch + tauri server:started/stopped 이벤트 listen.
+  // 같은 카드의 lifecycle 동안 여러 번 시작/종료될 수 있으니 양쪽 다 처리.
+  // 초기 fetch 는 'preparing' 으로 가정 — 이미 띄워진 인스턴스가 어느 단계인지 알 수 없음.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await isServiceRunning(serviceId);
+        if (!cancelled && r) setPhase("preparing");
+      } catch {
+        // ignore — 미지원 환경 (web mode 등)
+      }
+    })();
+
+    const unlistens: Array<() => void> = [];
+    (async () => {
+      try {
+        const u1 = await listen<{ serverId: string }>("server:started", (e) => {
+          if (e.payload.serverId === serviceId) setPhase("preparing");
+        });
+        const u2 = await listen<{ serverId: string }>("minecraft:started", (e) => {
+          if (e.payload.serverId === serviceId) setPhase("running");
+        });
+        const u3 = await listen<{ serverId: string }>("server:stopped", (e) => {
+          if (e.payload.serverId === serviceId) {
+            setPhase("idle");
+            setStopping(false);
+          }
+        });
+        if (cancelled) {
+          u1();
+          u2();
+          u3();
+        } else {
+          unlistens.push(u1, u2, u3);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      unlistens.forEach((u) => u());
+    };
+  }, [serviceId]);
+
+  // preparing → running 전환은 backend 의 'minecraft:started' event 가 처리.
+  // (Prism 자식 process 로 java[w].exe 가 등장하면 emit. 즉 모드팩 다운로드 + Mojang 인증
+  // 끝나고 minecraft 본체 클라이언트가 떠있는 시점.)
+
+  // 인스턴스 설치 여부 — 초기 fetch + 실행 시작/종료 시 재검사 (Play 직후 인스턴스 생성됨).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await isPrismInstanceInstalled(serviceId);
+        if (!cancelled) setInstanceInstalled(v);
+      } catch {
+        if (!cancelled) setInstanceInstalled(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [serviceId, running]);
+
+  const handleStop = async () => {
+    setStopping(true);
+    try {
+      await stopServer(serviceId);
+      // server:stopped 이벤트가 곧 도착해서 running=false 로 토글.
+    } catch (e) {
+      console.warn("[ServiceCard] stop 실패", e);
+      setStopping(false);
+    }
+  };
 
   // Status: SSE (manifest.endpoints.events) 가 있으면 push 모델 — adapter 가 join/leave
   // 같은 변화를 즉시 보냄. SSE 가 연결될 때 adapter 가 초기 status 도 함께 푸시하므로
@@ -134,8 +229,25 @@ export function ServiceCard({
   const primaryAction = manifest.actions.find((a) => a.primary);
   const secondaryActions = manifest.actions.filter((a) => a !== primaryAction);
 
+  // 카드의 border 색 — phase 별로 분기. preparing 은 amber, running 은 emerald.
+  const cardBorder =
+    phase === "running"
+      ? "border-emerald-500/60 ring-1 ring-emerald-500/20"
+      : phase === "preparing"
+        ? "border-amber-500/60 ring-1 ring-amber-500/20"
+        : "border-neutral-800 hover:border-neutral-700";
+
+  // 추가 상태 badge — 정상 상태에선 표시 안 함 (시각 노이즈 최소화).
+  const showPrismMissingBadge =
+    prismInstalled === false &&
+    manifest.actions.some((a) => a.kind === "native_third_party_app");
+  const showNotInstalledBadge =
+    instanceInstalled === false && !showPrismMissingBadge;
+
   return (
-    <div className="flex h-full flex-col gap-3 rounded-lg border border-neutral-800 bg-neutral-900/60 p-5 transition-colors hover:border-neutral-700">
+    <div
+      className={`flex h-full flex-col gap-3 rounded-lg border bg-neutral-900/60 p-5 transition-colors ${cardBorder}`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           {iconUrl && (
@@ -157,15 +269,49 @@ export function ServiceCard({
             )}
           </div>
         </div>
-        <div className="flex items-center gap-1.5">
-          <ServiceStatusBadge state={statusState} />
-          {onRemoveInstance && (
-            <CardMenu
-              open={menuOpen}
-              onOpenChange={setMenuOpen}
-              onRemoveInstance={onRemoveInstance}
-              displayName={displayName}
-            />
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-1.5">
+            <ServiceStatusBadge state={statusState} />
+            {onRemoveInstance && instanceInstalled !== false && (
+              <CardMenu
+                open={menuOpen}
+                onOpenChange={setMenuOpen}
+                onRemoveInstance={async () => {
+                  try {
+                    await onRemoveInstance();
+                    // Rust 측 폴더 삭제 성공 → 즉시 state 반영 (메뉴 숨김 + "미설치" badge).
+                    setInstanceInstalled(false);
+                  } catch {
+                    // 부모가 toast 처리. state 변경 없이 그대로.
+                  }
+                }}
+                displayName={displayName}
+              />
+            )}
+          </div>
+          {phase === "preparing" && (
+            <Badge className="bg-amber-900/50 text-amber-200" title="모드팩 다운로드 / Mojang 인증 / world load 중">
+              <Spinner />
+              준비 중
+            </Badge>
+          )}
+          {phase === "running" && (
+            <Badge className="bg-emerald-900/50 text-emerald-200">
+              <Dot className="bg-emerald-400 animate-pulse" />
+              실행 중
+            </Badge>
+          )}
+          {showPrismMissingBadge && (
+            <Badge className="bg-yellow-900/40 text-yellow-200" title="이 서비스는 PrismLauncher 가 필요합니다">
+              <Dot className="bg-yellow-400" />
+              PrismLauncher 필요
+            </Badge>
+          )}
+          {showNotInstalledBadge && (
+            <Badge className="bg-neutral-800 text-neutral-300" title="첫 실행 시 자동 설치">
+              <Dot className="bg-neutral-500" />
+              미설치
+            </Badge>
           )}
         </div>
       </div>
@@ -194,29 +340,49 @@ export function ServiceCard({
             key={action.id}
             size="sm"
             variant="outline"
-            disabled={invokingActionId !== null}
+            disabled={invokingActionId !== null || running}
             onClick={() => onAction(action)}
             className="cursor-pointer"
           >
             {invokingActionId === action.id ? "…" : action.label}
           </Button>
         ))}
-        {primaryAction && (
+        {running ? (
+          // 실행 중 — primary action 자리에 종료 버튼.
           <Button
             size="sm"
-            disabled={invokingActionId !== null}
-            onClick={() => onAction(primaryAction)}
-            className="min-w-[90px] cursor-pointer shadow-sm transition-all hover:shadow-md hover:brightness-110 hover:scale-[1.04] active:scale-[0.96] disabled:cursor-not-allowed"
+            variant="outline"
+            disabled={stopping}
+            onClick={() => void handleStop()}
+            className="min-w-[90px] cursor-pointer border-red-700/60 text-red-200 hover:bg-red-950/40 disabled:cursor-not-allowed"
           >
-            {invokingActionId === primaryAction.id ? (
+            {stopping ? (
               <span className="inline-flex items-center gap-1.5">
                 <Spinner />
-                실행 중
+                종료 중
               </span>
             ) : (
-              primaryAction.label
+              "종료"
             )}
           </Button>
+        ) : (
+          primaryAction && (
+            <Button
+              size="sm"
+              disabled={invokingActionId !== null}
+              onClick={() => onAction(primaryAction)}
+              className="min-w-[90px] cursor-pointer shadow-sm transition-all hover:shadow-md hover:brightness-110 hover:scale-[1.04] active:scale-[0.96] disabled:cursor-not-allowed"
+            >
+              {invokingActionId === primaryAction.id ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Spinner />
+                  실행 중
+                </span>
+              ) : (
+                primaryAction.label
+              )}
+            </Button>
+          )
         )}
       </div>
     </div>
@@ -387,7 +553,7 @@ function CardMenu({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onRemoveInstance: () => void;
+  onRemoveInstance: () => Promise<void>;
   displayName: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -414,11 +580,11 @@ function CardMenu({
   const handleRemove = () => {
     onOpenChange(false);
     const ok = confirm(
-      `${displayName} 의 Prism 인스턴스 폴더를 삭제할까요?\n\n` +
-        `Minecraft 의 saves/, mods/, config/ 등이 모두 사라집니다.\n` +
-        `다시 실행하면 PengPort 가 인스턴스를 재생성합니다 (saves 는 복구 불가).`,
+      `${displayName} 을(를) 제거할까요?\n\n` +
+        `게임 데이터 (saves, mods, config 등) 가 모두 사라집니다.\n` +
+        `다시 실행하면 처음부터 자동 설치됩니다 (saves 는 복구 불가).`,
     );
-    if (ok) onRemoveInstance();
+    if (ok) void onRemoveInstance();
   };
 
   return (
@@ -454,7 +620,7 @@ function CardMenu({
             onClick={handleRemove}
             className="flex w-full cursor-pointer items-center px-3 py-1.5 text-left text-xs text-red-300 transition-colors hover:bg-red-950/50"
           >
-            Prism 인스턴스 삭제
+            앱 제거
           </button>
         </div>
       )}

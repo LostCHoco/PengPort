@@ -99,27 +99,21 @@ pub async fn wipe_all_data(req: WipeRequest) -> Result<WipeReport, String> {
     }
 
     // 2) Prism 인스턴스 폴더들 (PengPort 가 만든 것).
+    //    Prism 자체가 시스템에 없으면 지울 인스턴스 폴더도 없으므로 silent skip — failures 에
+    //    추가하면 사용자에게 "실패" 로 보여 혼란.
     if !req.prism_instance_ids.is_empty() {
-        match prism::prism_paths() {
-            Ok((_, prism_paths)) => {
-                for id in &req.prism_instance_ids {
-                    let dir = prism_paths.instance_dir(id);
-                    if dir.exists() {
-                        if let Err(e) = std::fs::remove_dir_all(&dir) {
-                            report
-                                .failures
-                                .push(format!("prism instance '{id}': {e}"));
-                        } else {
-                            report.paths_removed.push(dir);
-                        }
+        if let Ok((_, prism_paths)) = prism::prism_paths() {
+            for id in &req.prism_instance_ids {
+                let dir = prism_paths.instance_dir(id);
+                if dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&dir) {
+                        report
+                            .failures
+                            .push(format!("prism instance '{id}': {e}"));
+                    } else {
+                        report.paths_removed.push(dir);
                     }
                 }
-            }
-            Err(e) => {
-                // Prism 미탐지 — 그냥 skip (없으면 삭제할 폴더도 없음).
-                report
-                    .failures
-                    .push(format!("prism_paths: {e}"));
             }
         }
     }

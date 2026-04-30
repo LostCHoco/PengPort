@@ -1,12 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
-import {
-  catalogCache,
-  pspListTrusts,
-  pspRevokeTrust,
-  type TrustEntryDto,
-} from "@/lib/psp";
+import { catalogCache, instanceCache, manifestCache } from "@/lib/psp";
 import { uninstallSelf, wipeAllData, type WipeReport } from "@/lib/api";
 import { loadInstances } from "@/lib/instances";
 import { useInstances } from "@/lib/instances-context";
@@ -99,92 +94,70 @@ export default function Settings() {
         )}
       </section>
 
-      <TrustSection />
+      <InstancesSection />
 
       <DangerZone />
     </div>
   );
 }
 
-// ====== 신뢰 관리 (PSP 3-tier trust) ======
+// ====== 인스턴스 관리 (등록한 PengPort 인스턴스 제거) ======
 
-function TrustSection() {
-  const [entries, setEntries] = useState<TrustEntryDto[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+function InstancesSection() {
+  const { instances, remove } = useInstances();
 
-  const refresh = useCallback(async () => {
-    try {
-      const list = await pspListTrusts();
-      list.sort((a, b) => b.trusted_at - a.trusted_at);
-      setEntries(list);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  const onRevoke = async (entry: TrustEntryDto) => {
-    try {
-      await pspRevokeTrust(entry.subject_kind, entry.subject_id);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
+  const onRemove = async (id: string, label: string) => {
+    const ok = confirm(
+      `${label} 을(를) 제거할까요?\n\n` +
+        `인스턴스 목록과 토큰이 사라집니다. 카탈로그/서비스 매니페스트는 다시 받게 됩니다.`,
+    );
+    if (!ok) return;
+    await remove(id);
   };
 
   return (
     <section className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/60 p-5">
       <div className="flex items-baseline justify-between">
-        <h3 className="text-sm font-medium text-neutral-200">신뢰 관리</h3>
-        <span className="text-[11px] text-neutral-500">
-          PSP 3-tier 신뢰 목록 (TOFU)
-        </span>
+        <h3 className="text-sm font-medium text-neutral-200">인스턴스 관리</h3>
+        <span className="text-[11px] text-neutral-500">등록된 PengPort 인스턴스</span>
       </div>
 
       <p className="text-xs text-neutral-400">
-        외부 앱 실행, 인스턴스 추가, 서비스 권한 등 사용자가 명시적으로 동의한
-        신뢰 항목입니다. 철회 시 다음 동일 호출에서 다시 확인 메시지가 표시됩니다.
+        제거하면 사이드바에서 사라지고, 다음에 같은 URL 로 다시 추가할 때 토큰을 새로
+        입력해야 합니다.
       </p>
 
-      {error && <p className="text-xs text-red-300">실패: {error}</p>}
-
-      {entries === null ? (
-        <p className="text-xs text-neutral-500">불러오는 중...</p>
-      ) : entries.length === 0 ? (
-        <p className="text-xs text-neutral-500">신뢰 항목이 없습니다.</p>
+      {instances.length === 0 ? (
+        <p className="text-xs text-neutral-500">등록된 인스턴스가 없습니다.</p>
       ) : (
         <ul className="space-y-2">
-          {entries.map((e) => (
-            <li
-              key={`${e.subject_kind}|${e.subject_id}`}
-              className="flex items-center justify-between gap-3 rounded border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs"
-            >
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-neutral-200">{e.display}</div>
-                <div className="mt-0.5 truncate font-mono text-[10.5px] text-neutral-500">
-                  {labelForKind(e.subject_kind)} · {e.subject_id}
+          {instances.map((inst) => {
+            const label = inst.name ?? inst.url;
+            return (
+              <li
+                key={inst.id}
+                className="flex items-center justify-between gap-3 rounded border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-neutral-200">{label}</div>
+                  <div className="mt-0.5 truncate font-mono text-[10.5px] text-neutral-500">
+                    {inst.url}
+                  </div>
                 </div>
-              </div>
-              <Button size="sm" variant="outline" onClick={() => onRevoke(e)}>
-                철회
-              </Button>
-            </li>
-          ))}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void onRemove(inst.id, label)}
+                >
+                  제거
+                </Button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
   );
-}
-
-function labelForKind(kind: string): string {
-  if (kind === "third_party.prism-launcher") return "Prism 외부 앱";
-  if (kind.startsWith("third_party.")) return `외부 앱 (${kind.slice(12)})`;
-  if (kind === "instance") return "인스턴스";
-  if (kind.startsWith("service.")) return "서비스";
-  return kind;
 }
 
 // ====== 위험 영역 (데이터 초기화 / 프로그램 삭제) ======
@@ -216,7 +189,7 @@ type ResetState =
   | { kind: "error"; message: string };
 
 function ResetCard() {
-  const { instances, setActive } = useInstances();
+  const { instances, setActive, refresh } = useInstances();
   const [state, setState] = useState<ResetState>({ kind: "idle" });
   const [confirmText, setConfirmText] = useState("");
 
@@ -252,8 +225,15 @@ function ResetCard() {
       localStorage.removeItem("pengport.active_instance_id");
       localStorage.removeItem("pengport.instance_url");
 
-      // 3) context 의 active 도 즉시 null 로 (다음 navigation 에서 OOBE).
+      // 3) PSP 메모리 캐시 정리 — fetch 한 catalog/manifest/instance 모두 비움.
+      //    안 하면 사이드바/PspLibrary 가 stale 데이터 표시.
+      catalogCache.clear();
+      manifestCache.clear();
+      instanceCache.clear();
+
+      // 4) context state 동기화 — instances list + active 모두 빈 상태로.
       setActive(null);
+      refresh();
 
       setState({ kind: "done", report });
     } catch (e) {

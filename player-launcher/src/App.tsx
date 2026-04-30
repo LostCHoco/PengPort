@@ -4,10 +4,25 @@ import { getVersion } from "@tauri-apps/api/app";
 import { checkForUpdate } from "@/lib/updater";
 import { useInstances } from "@/lib/instances-context";
 
+const LS_LIBRARY_EXPANDED = "pengport.sidebar.library_expanded";
+
 export default function App() {
   const [version, setVersion] = useState<string>("");
   const { instances, activeId, active, setActive } = useInstances();
   const navigate = useNavigate();
+  // "라이브러리" 그룹은 헤더 클릭으로 접었다 펼 수 있는 collapsible. 페이지 이동은 안 하고
+  // 하위 인스턴스 항목 클릭이 navigation 트리거. 사용자 선호는 localStorage 에 저장.
+  const [libraryExpanded, setLibraryExpanded] = useState<boolean>(() => {
+    const v = localStorage.getItem(LS_LIBRARY_EXPANDED);
+    return v === null ? true : v === "true";
+  });
+  const toggleLibrary = () => {
+    setLibraryExpanded((v) => {
+      const next = !v;
+      localStorage.setItem(LS_LIBRARY_EXPANDED, String(next));
+      return next;
+    });
+  };
 
   // 사이드바 표시용 현재 앱 버전. Tauri 가 native 에서 가져옴 (tauri.conf.json 의 version).
   useEffect(() => {
@@ -44,52 +59,62 @@ export default function App() {
           </p>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-3">
-          <SidebarLink to="/">라이브러리</SidebarLink>
+          {/* 라이브러리 그룹 헤더 — 클릭 시 인스턴스 list 접기/펼치기. 페이지 이동 없음. */}
+          <button
+            type="button"
+            onClick={toggleLibrary}
+            aria-expanded={libraryExpanded}
+            className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-neutral-400 transition-colors hover:bg-neutral-800/50 hover:text-neutral-100"
+          >
+            <Caret expanded={libraryExpanded} />
+            <span>라이브러리</span>
+          </button>
 
-          {/* 인스턴스 list (라이브러리 sub-item) */}
-          <div className="mt-1 ml-2 flex flex-col gap-0.5">
-            {instances.map((inst) => {
-              const isActive = inst.id === activeId;
-              const label = inst.name ?? inst.url;
-              return (
-                <button
-                  key={inst.id}
-                  type="button"
-                  onClick={() => {
-                    setActive(inst.id);
-                    navigate("/");
-                  }}
-                  className={[
-                    "flex items-center gap-2 truncate rounded-md px-2.5 py-1.5 text-left text-xs transition-colors",
-                    isActive
-                      ? "bg-neutral-800/70 text-neutral-100"
-                      : "text-neutral-500 hover:bg-neutral-800/40 hover:text-neutral-300",
-                  ].join(" ")}
-                  title={inst.url}
-                >
-                  <span
+          {libraryExpanded && (
+            <div className="mt-1 ml-2 flex flex-col gap-0.5">
+              {instances.map((inst) => {
+                const isActive = inst.id === activeId;
+                const label = inst.name ?? inst.url;
+                return (
+                  <button
+                    key={inst.id}
+                    type="button"
+                    onClick={() => {
+                      navigate("/");
+                      if (inst.id !== activeId) setActive(inst.id);
+                    }}
                     className={[
-                      "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
-                      isActive ? "bg-emerald-400" : "bg-neutral-600",
+                      "flex cursor-pointer items-center gap-2 truncate rounded-md px-2.5 py-1.5 text-left text-xs transition-colors active:scale-[0.98]",
+                      isActive
+                        ? "bg-neutral-800/70 text-neutral-100 hover:bg-neutral-700/70"
+                        : "text-neutral-500 hover:bg-neutral-800/40 hover:text-neutral-300",
                     ].join(" ")}
-                    aria-hidden
-                  />
-                  <span className="truncate">{label}</span>
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => {
-                setActive(null);
-                navigate("/");
-              }}
-              className="flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-neutral-500 transition-colors hover:bg-neutral-800/40 hover:text-neutral-300"
-            >
-              <span className="inline-block w-1.5" aria-hidden />
-              <span>+ 인스턴스 추가</span>
-            </button>
-          </div>
+                    title={inst.url}
+                  >
+                    <span
+                      className={[
+                        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+                        isActive ? "bg-emerald-400" : "bg-neutral-600",
+                      ].join(" ")}
+                      aria-hidden
+                    />
+                    <span className="truncate">{label}</span>
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => {
+                  navigate("/");
+                  if (activeId !== null) setActive(null);
+                }}
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs text-neutral-500 transition-colors hover:bg-neutral-800/40 hover:text-neutral-300 active:scale-[0.98]"
+              >
+                <span className="inline-block w-1.5" aria-hidden />
+                <span>+ 인스턴스 추가</span>
+              </button>
+            </div>
+          )}
 
           <div className="mt-3 flex flex-col gap-1">
             <SidebarLink to="/third-party">서드파티 앱</SidebarLink>
@@ -106,6 +131,21 @@ export default function App() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+function Caret({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 10 10"
+      fill="currentColor"
+      aria-hidden
+      className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`}
+    >
+      <path d="M3 1l4 4-4 4z" />
+    </svg>
   );
 }
 

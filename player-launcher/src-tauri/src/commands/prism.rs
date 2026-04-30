@@ -355,6 +355,28 @@ pub fn detect_prism() -> Option<PrismLocation> {
     find_prism()
 }
 
+/// PengPort 가 만든 Prism 인스턴스 폴더가 실제로 존재하는지 (= 첫 실행 후 사용자가 한 번
+/// Play 했는지). ServiceCard 가 "처음 실행" / "이미 설치됨" 상태 분기에 사용.
+///
+/// `instance.cfg` 파일까지 검사해서 빈 폴더는 미설치로 간주 (Prism 의 metadata 가 있어야
+/// 진짜 인스턴스로 인식되므로).
+#[tauri::command]
+pub fn is_prism_instance_installed(instance_id: String) -> bool {
+    let Some(loc) = find_prism() else { return false };
+    let instance_dir = loc.data_dir.join("instances").join(&instance_id);
+    instance_dir.join("instance.cfg").is_file()
+}
+
+/// 해당 service id 의 Prism 인스턴스가 현재 실행 중인지. running_pids 의 hashmap 조회.
+/// ServiceCard 가 border 색 / Play→종료 버튼 토글에 사용.
+#[tauri::command]
+pub fn is_service_running(service_id: String) -> bool {
+    running_pids()
+        .lock()
+        .map(|m| m.contains_key(&service_id))
+        .unwrap_or(false)
+}
+
 // --- OOBE 자동 다운로드 ---------------------------------------------------
 
 const PRISM_RELEASES_API: &str =
@@ -469,7 +491,11 @@ pub async fn download_prism() -> Result<PrismDownloadResult, String> {
 /// `pub(super)` — PSP `third_party.prism-launcher` 분기 (`commands::psp::invoke_third_party`)
 /// 가 자체 sync (`upsert_prism_instance`) 후 이 함수만 호출.
 ///
-/// 자식 종료 시 `server:stopped` event emit. spawn 직후 `server:started` 도 emit.
+/// Event 흐름:
+/// - `server:started`     — Prism 자체 spawn 완료 (= "준비 중" 시작)
+/// - `minecraft:started`  — Prism 의 자식으로 java[w].exe 등장 (= 모드팩 다운로드 + Mojang
+///   인증 끝나고 minecraft 클라이언트가 띄워짐. ServiceCard 의 "실행 중" 전환 신호)
+/// - `server:stopped`     — Prism process 종료
 pub(super) fn spawn_prism_instance(
     app: &AppHandle,
     instance_id: &str,
@@ -493,6 +519,14 @@ pub(super) fn spawn_prism_instance(
         serde_json::json!({ "serverId": instance_id }),
     );
 
+    // 자식 process 감시 — Prism 이 minecraft (java[w].exe) 를 spawn 하면 "minecraft:started"
+    // event emit. polling 1초 간격, 한 번 발견하면 종료.
+    let app_for_watch = app.clone();
+    let id_for_watch = instance_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        watch_for_minecraft_child(pid, id_for_watch, app_for_watch).await;
+    });
+
     let app_for_wait = app.clone();
     let id_for_wait = instance_id.to_string();
     tauri::async_runtime::spawn_blocking(move || {
@@ -505,6 +539,114 @@ pub(super) fn spawn_prism_instance(
     });
 
     Ok(())
+}
+
+/// Prism PID 의 자식 중 진짜 minecraft 클라이언트 **창** 이 등장하는지 polling.
+///
+/// 두 단계 검증:
+/// 1. cmdline 에 `org.prismlauncher.EntryPoint` 가 들어있는 java[w] 자식 — packwiz-installer
+///    같은 PreLaunch java process 와 구분.
+/// 2. 그 java process 의 visible top-level window 가 등장 — LWJGL 초기화 + world load 가
+///    끝나서 GLFW 창이 뜬 시점. 게임 본체가 사용자에게 보이기 시작하는 진짜 "실행 중".
+async fn watch_for_minecraft_child(prism_pid: u32, service_id: String, app: AppHandle) {
+    use std::time::Duration;
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use tauri::Emitter;
+
+    let mut sys = System::new();
+    let refresh_kind = ProcessRefreshKind::new().with_cmd(UpdateKind::Always);
+
+    // 최대 10분 polling, 1초 간격.
+    let max_iterations = 600;
+    for _ in 0..max_iterations {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, refresh_kind);
+
+        if !running_pids()
+            .lock()
+            .map(|m| m.contains_key(&service_id))
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let parent = sysinfo::Pid::from_u32(prism_pid);
+        let mc_pid: Option<u32> = sys.processes().iter().find_map(|(pid, p)| {
+            if p.parent() != Some(parent) {
+                return None;
+            }
+            let has_entry = p.cmd().iter().any(|arg| {
+                arg.to_string_lossy()
+                    .contains("org.prismlauncher.EntryPoint")
+            });
+            if has_entry {
+                Some(pid.as_u32())
+            } else {
+                None
+            }
+        });
+
+        if let Some(java_pid) = mc_pid {
+            #[cfg(windows)]
+            {
+                if has_visible_window_for_pid(java_pid) {
+                    let _ = app.emit(
+                        "minecraft:started",
+                        serde_json::json!({ "serverId": service_id }),
+                    );
+                    return;
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = java_pid;
+                let _ = app.emit(
+                    "minecraft:started",
+                    serde_json::json!({ "serverId": service_id }),
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// 특정 PID 가 visible top-level window 를 가지고 있는지. EnumWindows 로 모든 window 순회 +
+/// GetWindowThreadProcessId 로 PID 매칭. minecraft 의 GLFW 창은 java process 가 직접 만들어
+/// owner == java[w].exe 의 PID.
+#[cfg(windows)]
+fn has_visible_window_for_pid(target_pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    struct State {
+        target_pid: u32,
+        found: bool,
+    }
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = unsafe { &mut *(lparam as *mut State) };
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return 1;
+        }
+        let mut pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid == state.target_pid {
+            state.found = true;
+            return 0;
+        }
+        1
+    }
+
+    let mut state = State {
+        target_pid,
+        found: false,
+    };
+    unsafe {
+        EnumWindows(Some(cb), &mut state as *mut _ as LPARAM);
+    }
+    state.found
 }
 
 /// 실행 중인 서버 (Prism + child Minecraft) 를 강제 종료.

@@ -33,6 +33,8 @@ interface InstancesContextValue {
   remove: (id: string) => Promise<void>;
   setActive: (id: string | null) => void;
   updateName: (id: string, name: string | undefined) => void;
+  /** localStorage 를 외부에서 직접 비운 후 React state 동기화 (예: 데이터 초기화). */
+  refresh: () => void;
 }
 
 const InstancesContext = createContext<InstancesContextValue | null>(null);
@@ -97,7 +99,7 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
 
   return (
     <InstancesContext.Provider
-      value={{ instances, activeId, active, add, remove, setActive, updateName }}
+      value={{ instances, activeId, active, add, remove, setActive, updateName, refresh }}
     >
       {children}
     </InstancesContext.Provider>

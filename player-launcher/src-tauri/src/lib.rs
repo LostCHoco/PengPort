@@ -14,6 +14,8 @@ pub fn run() {
             commands::prism::set_prism_override,
             commands::prism::remove_bundled_prism,
             commands::prism::stop_server,
+            commands::prism::is_prism_instance_installed,
+            commands::prism::is_service_running,
             // secrets (OS keychain — instance_token, multi-instance 별 격리)
             commands::secrets::instance_token_save,
             commands::secrets::instance_token_load,

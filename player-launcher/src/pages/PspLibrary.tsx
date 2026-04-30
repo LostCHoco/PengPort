@@ -21,7 +21,7 @@ import {
 } from "@/components/ThirdPartyInstallDialog";
 import { ServiceCard } from "@/components/ServiceCard";
 import { Button } from "@/components/ui/button";
-import { removePrismInstance } from "@/lib/api";
+import { detectPrism, removePrismInstance } from "@/lib/api";
 import {
   catalogCache,
   instanceCache,
@@ -71,7 +71,7 @@ interface ToastState {
 }
 
 export default function PspLibrary() {
-  const { active, remove, updateName } = useInstances();
+  const { active, updateName } = useInstances();
   const [state, setState] = useState<LoadState>({ kind: "needs_setup" });
   const [invokingActionId, setInvokingActionId] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -84,6 +84,24 @@ export default function PspLibrary() {
     pending: PendingAction;
   } | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [prismInstalled, setPrismInstalled] = useState<boolean | null>(null);
+
+  // PrismLauncher 설치 여부 — 1회 fetch 후 모든 ServiceCard 에 전달. 설치 dialog 가 끝나면
+  // re-detect 해서 badge 갱신.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const loc = await detectPrism();
+        if (!cancelled) setPrismInstalled(loc !== null);
+      } catch {
+        if (!cancelled) setPrismInstalled(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingInstall]);
 
   const loadFromInstance = useCallback(
     async (instanceId: string, instanceUrl: string) => {
@@ -162,18 +180,6 @@ export default function PspLibrary() {
     }
   }, [state, active, updateName]);
 
-  const handleRemoveActive = useCallback(() => {
-    if (!active) return;
-    void (async () => {
-      // active instance 만 제거. context 가 다른 instance 또는 null 로 active 변경.
-      // catalog/manifest cache 도 정리 (URL 기반이라 다른 instance 영향 없지만 깔끔하게).
-      instanceCache.clear();
-      catalogCache.clear();
-      manifestCache.clear();
-      await remove(active.id);
-    })();
-  }, [active, remove]);
-
   // ====== Action invoke ======
 
   const invoke = useCallback(
@@ -207,7 +213,7 @@ export default function PspLibrary() {
         case "launched":
           setToast({
             kind: "info",
-            message: `${action.label} 실행: ${outcome.instance_id}`,
+            message: `${service.manifest.name} 실행 시작`,
           });
           return;
         case "needs_confirm":
@@ -309,17 +315,19 @@ export default function PspLibrary() {
     setPendingInstall(null);
   }, []);
 
-  // ServiceCard 의 "Prism 인스턴스 삭제" 메뉴 — confirm 없이 호출 (카드가 자체 confirm 처리).
+  // ServiceCard 의 "앱 제거" 메뉴 — confirm 없이 호출 (카드가 자체 confirm 처리).
+  // 성공 시 ServiceCard 가 자기 상태 (instanceInstalled=false) 갱신하도록 Promise 반환.
   const handleRemoveServiceInstance = useCallback(
-    async (service: ServiceState) => {
+    async (service: ServiceState): Promise<void> => {
       try {
         await removePrismInstance(service.entry.id);
         setToast({
           kind: "info",
-          message: `${service.manifest.name} 의 Prism 인스턴스 폴더 삭제 완료`,
+          message: `${service.manifest.name} 제거 완료`,
         });
       } catch (e) {
-        setToast({ kind: "error", message: `삭제 실패: ${e}` });
+        setToast({ kind: "error", message: `제거 실패: ${e}` });
+        throw e;
       }
     },
     [],
@@ -350,27 +358,17 @@ export default function PspLibrary() {
             >
               다시 시도
             </Button>
-            <Button size="sm" variant="outline" onClick={handleRemoveActive}>
-              인스턴스 제거
-            </Button>
           </div>
+          <p className="text-xs text-red-300/60">
+            계속 실패하면 설정 → 인스턴스 관리에서 제거 후 다시 추가하세요.
+          </p>
         </div>
       )}
 
       {state.kind === "ready" && (
         <>
-          <header className="mb-6 flex items-baseline justify-between">
-            <div>
-              <h2 className="text-2xl font-semibold">{state.instance.name}</h2>
-              <p className="mt-1 text-xs text-neutral-500">
-                {state.instance.operator.name}
-                {state.instance.description &&
-                  ` · ${state.instance.description}`}
-              </p>
-            </div>
-            <Button size="sm" variant="outline" onClick={handleRemoveActive}>
-              인스턴스 제거
-            </Button>
+          <header className="mb-6">
+            <h2 className="text-2xl font-semibold">{state.instance.name}</h2>
           </header>
 
           {state.services.length === 0 ? (
@@ -381,13 +379,15 @@ export default function PspLibrary() {
                 <li key={entry.id}>
                   <ServiceCard
                     manifest={manifest}
+                    serviceId={entry.id}
                     bearerToken={state.bearerToken ?? undefined}
                     hintName={entry.hint?.name}
                     hintIcon={entry.hint?.icon}
                     onAction={handleAction({ entry, manifest })}
                     invokingActionId={invokingActionId}
+                    prismInstalled={prismInstalled ?? undefined}
                     onRemoveInstance={() =>
-                      void handleRemoveServiceInstance({ entry, manifest })
+                      handleRemoveServiceInstance({ entry, manifest })
                     }
                   />
                 </li>
@@ -466,8 +466,7 @@ export function InstanceSetup() {
     <div className="mx-auto max-w-lg space-y-4 rounded-lg border border-sky-900/50 bg-sky-900/15 p-6">
       <h2 className="text-lg font-semibold text-sky-100">인스턴스 추가</h2>
       <p className="text-sm text-sky-200/90">
-        연결할 PengPort 인스턴스의 URL 을 입력하세요. 운영자가 알려준 도메인입니다
-        (예: <code>https://pengdoll.duckdns.org</code>).
+        연결할 PengPort 인스턴스의 URL 을 입력하세요. 운영자가 알려준 도메인입니다.
       </p>
 
       <div className="space-y-2">
@@ -476,7 +475,7 @@ export function InstanceSetup() {
           type="text"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
-          placeholder="https://pengdoll.duckdns.org"
+          placeholder="https://..."
           className="w-full rounded bg-neutral-950 px-3 py-2 font-mono text-sm text-neutral-100 outline-none ring-1 ring-neutral-800 focus:ring-sky-700"
           autoFocus
           spellCheck={false}

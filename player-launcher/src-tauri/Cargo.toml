@@ -36,6 +36,18 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # 공유 크레이트 (servers.toml 스키마/파서)
 pengport-shared = { path = "../../shared" }
 
+# Process tree 조회 — Prism 이 spawn 한 minecraft (java[w].exe) 자식 process 를 감지해서
+# ServiceCard 의 "준비 중" → "실행 중" 전환 신호로 사용.
+sysinfo = { version = "0.31", default-features = false, features = ["system"] }
+# Tauri 내부적으로 tokio 사용하지만 re-export 안 함. polling 의 sleep + async runtime 호환용.
+tokio = { version = "1", features = ["time"] }
+
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
+# minecraft 클라이언트의 visible window 가 떴는지 검출 (EnumWindows + GetWindowThreadProcessId).
+# java process spawn ≠ 게임 창 등장 — 그 사이 LWJGL 초기화 + world load 가 있음.
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
 

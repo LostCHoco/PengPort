@@ -60,6 +60,18 @@ export async function stopServer(serverId: string): Promise<void> {
   return await invoke<void>("stop_server", { serverId });
 }
 
+/** PengPort 가 만든 Prism 인스턴스 폴더가 존재하는지 (= 한 번이라도 Play 했는지). */
+export async function isPrismInstanceInstalled(
+  instanceId: string,
+): Promise<boolean> {
+  return await invoke<boolean>("is_prism_instance_installed", { instanceId });
+}
+
+/** 해당 service 의 Prism 인스턴스가 현재 실행 중인지. */
+export async function isServiceRunning(serviceId: string): Promise<boolean> {
+  return await invoke<boolean>("is_service_running", { serviceId });
+}
+
 // ============================================================
 // 데이터 정리/언인스톨 (위험 작업 — frontend 에서 사용자 confirm 후 호출)
 // ============================================================
