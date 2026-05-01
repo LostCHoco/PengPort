@@ -37,19 +37,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify version alignment (tag ≡ tauri.conf.json ≡ Cargo.toml)
+      - name: Verify version alignment (tag ≡ tauri.conf.json ≡ Cargo.toml ≡ package.json)
         shell: bash
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          # 세 값을 모두 일치시켜야 한다.
+          # 네 값을 모두 일치시켜야 한다.
           # - tag                : GH Releases / 버전 식별용
           # - tauri.conf.json    : NSIS installer 의 ProductVersion + latest.json 의 version
           # - Cargo.toml         : binary 의 CARGO_PKG_VERSION (= tauri 의 getVersion() / updater 의
           #                       self-version 비교 기준). 한쪽만 bump 하면 0.1.0 → 0.1.1 update
           #                       후에도 self-version 이 0.1.0 그대로라 무한 update 루프 발생.
+          # - package.json       : npm/dev 출력 표시용. PengPort app 자체엔 영향 없지만 일관성 위해
+          #                       동기화. mismatch 면 dev 시 "pengport@0.1.0" 같은 stale 출력.
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           CONF_VERSION=$(jq -r .version player-launcher/src-tauri/tauri.conf.json)
           CARGO_VERSION=$(awk -F'"' '/^version\s*=/{print $2; exit}' Cargo.toml)
+          PKG_VERSION=$(jq -r .version player-launcher/package.json)
           ok=true
           if [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
             echo "✗ tauri.conf.json version ($CONF_VERSION) ≠ tag ($TAG_VERSION)"
@@ -59,12 +62,16 @@ jobs:
             echo "✗ Cargo.toml workspace.package.version ($CARGO_VERSION) ≠ tag ($TAG_VERSION)"
             ok=false
           fi
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "✗ player-launcher/package.json version ($PKG_VERSION) ≠ tag ($TAG_VERSION)"
+            ok=false
+          fi
           if ! $ok; then
             echo
-            echo "→ 두 파일 모두 같은 version 으로 bump 한 commit 후 같은 version 의 tag 를 push 하세요."
+            echo "→ 세 파일 모두 같은 version 으로 bump 한 commit 후 같은 version 의 tag 를 push 하세요."
             exit 1
           fi
-          echo "✓ tag = tauri.conf = Cargo.toml = $TAG_VERSION"
+          echo "✓ tag = tauri.conf = Cargo.toml = package.json = $TAG_VERSION"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
