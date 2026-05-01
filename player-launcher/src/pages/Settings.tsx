@@ -7,7 +7,7 @@ import { uninstallSelf, wipeAllData, type WipeReport } from "@/lib/api";
 import { loadInstances } from "@/lib/instances";
 import { useInstances } from "@/lib/instances-context";
 import { instanceToken } from "@/lib/secrets";
-import { buildInviteUrl } from "@/lib/invite";
+import { buildInviteLandingUrl } from "@/lib/invite";
 
 type CheckState =
   | { kind: "idle" }
@@ -136,9 +136,11 @@ function InstancesSection() {
         );
         if (!ok) return;
       }
-      const inviteUrl = buildInviteUrl({ url, token });
+      // HTTPS landing 형식 — 디스코드/카톡 등 메시지 앱에서 자동 hyperlink.
+      // gateway 의 `/invite` 가 meta refresh 로 `pengport://join?...` 로 redirect.
+      const inviteUrl = buildInviteLandingUrl({ url, token });
       await writeText(inviteUrl);
-      setCopyState({ id, kind: "ok", message: "초대 링크 복사됨" });
+      setCopyState({ id, kind: "ok", message: "초대 링크 복사됨 (디스코드/카톡 가능)" });
     } catch (e) {
       setCopyState({ id, kind: "error", message: String(e) });
     }
