@@ -1,10 +1,13 @@
 import { useState } from "react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
 import { catalogCache, instanceCache, manifestCache } from "@/lib/psp";
 import { uninstallSelf, wipeAllData, type WipeReport } from "@/lib/api";
 import { loadInstances } from "@/lib/instances";
 import { useInstances } from "@/lib/instances-context";
+import { instanceToken } from "@/lib/secrets";
+import { buildInviteUrl } from "@/lib/invite";
 
 type CheckState =
   | { kind: "idle" }
@@ -101,10 +104,13 @@ export default function Settings() {
   );
 }
 
-// ====== 인스턴스 관리 (등록한 PengPort 인스턴스 제거) ======
+// ====== 인스턴스 관리 (등록한 PengPort 인스턴스 제거 + 초대 링크 복사) ======
+
+type CopyState = { id: string; kind: "ok" | "error"; message: string } | null;
 
 function InstancesSection() {
   const { instances, remove } = useInstances();
+  const [copyState, setCopyState] = useState<CopyState>(null);
 
   const onRemove = async (id: string, label: string) => {
     const ok = confirm(
@@ -113,6 +119,29 @@ function InstancesSection() {
     );
     if (!ok) return;
     await remove(id);
+  };
+
+  // 초대 링크 복사: 그 인스턴스의 keyring token 으로 `pengport://join?...` 생성.
+  // 토큰이 없으면 (auth.type=none 이거나 미저장) token=빈 값으로 생성.
+  // 사용자에게 "토큰이 평문 포함" 경고를 한 번 보여주고 진행 — 친구 그룹 / 반신뢰 모델 가정.
+  const onCopyInvite = async (id: string, url: string) => {
+    setCopyState(null);
+    try {
+      const token = (await instanceToken.load(id)) ?? "";
+      if (token.length > 0) {
+        const ok = confirm(
+          "이 초대 링크에는 인스턴스 토큰이 평문으로 포함됩니다.\n\n" +
+            "신뢰하는 친구에게만 1:1 로 전달하세요. 공개 채널 (오픈 채팅, 공개 게시판 등)\n" +
+            "에 올리지 마세요.\n\n계속할까요?",
+        );
+        if (!ok) return;
+      }
+      const inviteUrl = buildInviteUrl({ url, token });
+      await writeText(inviteUrl);
+      setCopyState({ id, kind: "ok", message: "초대 링크 복사됨" });
+    } catch (e) {
+      setCopyState({ id, kind: "error", message: String(e) });
+    }
   };
 
   return (
@@ -124,7 +153,8 @@ function InstancesSection() {
 
       <p className="text-xs text-neutral-400">
         제거하면 사이드바에서 사라지고, 다음에 같은 URL 로 다시 추가할 때 토큰을 새로
-        입력해야 합니다.
+        입력해야 합니다. <span className="text-neutral-300">초대 링크</span> 는 친구가
+        클릭하면 PengPort 가 자동으로 가입 dialog 를 띄웁니다.
       </p>
 
       {instances.length === 0 ? (
@@ -133,24 +163,48 @@ function InstancesSection() {
         <ul className="space-y-2">
           {instances.map((inst) => {
             const label = inst.name ?? inst.url;
+            const note = copyState?.id === inst.id ? copyState : null;
             return (
               <li
                 key={inst.id}
-                className="flex items-center justify-between gap-3 rounded border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs"
+                className="space-y-1 rounded border border-neutral-800 bg-neutral-950/40 px-3 py-2 text-xs"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-neutral-200">{label}</div>
-                  <div className="mt-0.5 truncate font-mono text-[10.5px] text-neutral-500">
-                    {inst.url}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-neutral-200">{label}</div>
+                    <div className="mt-0.5 truncate font-mono text-[10.5px] text-neutral-500">
+                      {inst.url}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void onCopyInvite(inst.id, inst.url)}
+                    >
+                      초대 링크 복사
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void onRemove(inst.id, label)}
+                    >
+                      제거
+                    </Button>
                   </div>
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void onRemove(inst.id, label)}
-                >
-                  제거
-                </Button>
+                {note && (
+                  <p
+                    className={
+                      note.kind === "ok"
+                        ? "text-[11px] text-emerald-300"
+                        : "text-[11px] text-red-300"
+                    }
+                  >
+                    {note.kind === "ok" ? "✓ " : "✗ "}
+                    {note.message}
+                  </p>
+                )}
               </li>
             );
           })}

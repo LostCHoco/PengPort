@@ -1,20 +1,34 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import { getVersion } from "@tauri-apps/api/app";
+import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { checkForUpdate } from "@/lib/updater";
 import { useInstances } from "@/lib/instances-context";
 import {
   UpdatePromptDialog,
   type UpdatePromptInfo,
 } from "@/components/UpdatePromptDialog";
+import { InviteDialog, type InviteRequest } from "@/components/InviteDialog";
+import { instanceToken } from "@/lib/secrets";
 
 const LS_LIBRARY_EXPANDED = "pengport.sidebar.library_expanded";
 
 export default function App() {
   const [version, setVersion] = useState<string>("");
   const [updatePrompt, setUpdatePrompt] = useState<UpdatePromptInfo | null>(null);
-  const { instances, activeId, active, setActive } = useInstances();
+  const [invite, setInvite] = useState<InviteRequest | null>(null);
+  const [inviteProcessing, setInviteProcessing] = useState(false);
+  const { instances, activeId, active, setActive, add } = useInstances();
   const navigate = useNavigate();
+
+  // useInstances() 의 instances/add 는 closure 안에서 stale 위험 — onOpenUrl 콜백은 한 번 등록
+  // 후 hot launch 마다 호출되므로 ref 로 항상 최신 value 접근.
+  const instancesRef = useRef(instances);
+  instancesRef.current = instances;
+  const addRef = useRef(add);
+  addRef.current = add;
+  const setActiveRef = useRef(setActive);
+  setActiveRef.current = setActive;
   // "라이브러리" 그룹은 헤더 클릭으로 접었다 펼 수 있는 collapsible. 페이지 이동은 안 하고
   // 하위 인스턴스 항목 클릭이 navigation 트리거. 사용자 선호는 localStorage 에 저장.
   const [libraryExpanded, setLibraryExpanded] = useState<boolean>(() => {
@@ -53,6 +67,75 @@ export default function App() {
         console.warn("[updater] check failed:", e);
       }
     })();
+  }, []);
+
+  // ====== Deep link (`pengport://join?...`) 처리 ======
+  //
+  // 두 진입 경로:
+  //  - cold start: OS 가 PengPort 를 새로 띄우면서 argv 로 URL 전달 → getCurrent() 가 반환
+  //  - hot: 이미 실행 중인데 link 클릭 → single_instance 가 첫 인스턴스로 forward,
+  //    deep_link plugin 의 onOpenUrl 이 emit
+  //
+  // 둘 다 같은 핸들러로 dispatch → InviteDialog.
+
+  const handleDeepLinkUrls = useCallback((urls: string[] | null) => {
+    if (!urls || urls.length === 0) return;
+    // 한 번에 여러 URL 이 들어와도 첫 번째만 처리 (드문 케이스 — 사용자는 하나만 클릭).
+    const parsed = parseInviteUrl(urls[0]);
+    if (!parsed) {
+      console.warn("[deep-link] 알 수 없는 URL:", urls[0]);
+      return;
+    }
+    const exists = instancesRef.current.some((i) => i.url === parsed.url);
+    setInvite({ url: parsed.url, token: parsed.token, alreadyExists: exists });
+  }, []);
+
+  // mount 시 cold-start URL 확인 + onOpenUrl listener 등록.
+  // listener 는 unmount 시 cleanup — App.tsx 는 단일 root 라 effective lifetime = app lifetime.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        const current = await getCurrent();
+        handleDeepLinkUrls(current);
+      } catch (e) {
+        console.warn("[deep-link] getCurrent 실패:", e);
+      }
+      try {
+        unlisten = await onOpenUrl(handleDeepLinkUrls);
+      } catch (e) {
+        console.warn("[deep-link] onOpenUrl 등록 실패:", e);
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [handleDeepLinkUrls]);
+
+  const handleInviteAccept = useCallback(async () => {
+    if (!invite) return;
+    setInviteProcessing(true);
+    try {
+      // 같은 URL 의 entry 가 이미 있으면 add() 가 그걸 재사용 + setActive 까지 함.
+      // alreadyExists 든 아니든 add() 로 단일 흐름.
+      const entry = addRef.current({ url: invite.url });
+      if (invite.token.length > 0) {
+        await instanceToken.save(entry.id, invite.token);
+      }
+      setActiveRef.current(entry.id);
+      setInvite(null);
+      navigate("/");
+    } catch (e) {
+      console.error("[deep-link] 가입 실패:", e);
+      // 실패 케이스 — dialog 는 닫지 않고 사용자에게 다시 시도 기회. 단순화 위해 alert.
+      alert(`가입 실패: ${e}`);
+    } finally {
+      setInviteProcessing(false);
+    }
+  }, [invite, navigate]);
+
+  const handleInviteDecline = useCallback(() => {
+    setInvite(null);
   }, []);
 
   return (
@@ -141,8 +224,52 @@ export default function App() {
         info={updatePrompt}
         onDismiss={() => setUpdatePrompt(null)}
       />
+      <InviteDialog
+        request={invite}
+        onAccept={handleInviteAccept}
+        onDecline={handleInviteDecline}
+        processing={inviteProcessing}
+      />
     </div>
   );
+}
+
+/**
+ * 초대 링크 파싱: `pengport://join?url=<encoded>&token=<encoded>`.
+ *
+ * - host 부분 (`join`) 이 action selector. 향후 다른 action 추가 가능 (예: presence).
+ * - url / token 은 percent-encoded — searchParams 가 자동 decode.
+ * - url 은 https/http 만 허용 (다른 scheme 차단). token 은 빈 값도 허용 (auth.type=none 인 인스턴스 대응).
+ *
+ * 검증 실패 시 null — 호출자가 무시.
+ */
+function parseInviteUrl(raw: string): { url: string; token: string } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "pengport:") return null;
+  // host 또는 pathname 으로 action 식별. WHATWG URL 이 custom scheme 에서 host 가 비어있고
+  // pathname 에 `//join` 이 들어가는 경우도 있어 둘 다 검사.
+  const action = parsed.host || parsed.pathname.replace(/^\/+/, "");
+  if (action !== "join") return null;
+
+  const target = parsed.searchParams.get("url");
+  const token = parsed.searchParams.get("token") ?? "";
+  if (!target) return null;
+  try {
+    const t = new URL(target);
+    if (t.protocol !== "https:" && t.protocol !== "http:") return null;
+    // 끝 trailing slash 정규화 — `https://x.com` 과 `https://x.com/` 가 같은 인스턴스로
+    // 인식되어야 함 (instances.ts 의 URL 비교는 string 정확 일치). 대부분 사용자 입력이
+    // trailing slash 없는 형태라 그쪽으로 통일.
+    const normalized = t.origin + (t.pathname === "/" ? "" : t.pathname);
+    return { url: normalized, token: token.trim() };
+  } catch {
+    return null;
+  }
 }
 
 function Caret({ expanded }: { expanded: boolean }) {
