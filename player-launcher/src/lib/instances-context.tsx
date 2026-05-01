@@ -46,6 +46,16 @@ interface InstancesContextValue {
   updateName: (id: string, name: string | undefined) => void;
   /** localStorage 를 외부에서 직접 비운 후 React state 동기화 (예: 데이터 초기화). */
   refresh: () => void;
+  /**
+   * 같은 active instance 의 catalog/manifest 를 강제 재fetch.
+   *
+   * 토큰 갱신 (alreadyExists invite) 후 instance id 자체는 안 변하므로 PspLibrary 의
+   * useEffect 가 트리거 안 됨 → 화면이 옛 데이터 그대로. 이 함수가 reloadKey 를 bump
+   * 하면 PspLibrary 가 deps 변경으로 인식해 재로드. PSP 메모리 캐시도 같이 비움.
+   */
+  refreshActiveCatalog: () => void;
+  /** PspLibrary 의 useEffect deps 에 포함되는 reload counter — 외부에서 직접 사용 X. */
+  reloadKey: number;
 }
 
 const InstancesContext = createContext<InstancesContextValue | null>(null);
@@ -57,6 +67,9 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
   const [activeId, setActiveIdState] = useState<string | null>(() =>
     getActiveInstanceId(),
   );
+  // active id 가 변하지 않을 때도 catalog 를 재fetch 해야 하는 케이스 (토큰 갱신 등) 의 trigger.
+  // 매 호출마다 +1 — PspLibrary 의 useEffect deps 에 들어가서 실행 보장.
+  const [reloadKey, setReloadKey] = useState(0);
 
   // mount 시 한 번만 옛 schema 마이그레이션. 변환됐으면 state 갱신.
   useEffect(() => {
@@ -72,6 +85,11 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(() => {
     setInstances(loadInstances());
     setActiveIdState(getActiveInstanceId());
+  }, []);
+
+  const refreshActiveCatalog = useCallback(() => {
+    invalidatePspCaches();
+    setReloadKey((k) => k + 1);
   }, []);
 
   const add = useCallback(
@@ -114,7 +132,18 @@ export function InstancesProvider({ children }: { children: ReactNode }) {
 
   return (
     <InstancesContext.Provider
-      value={{ instances, activeId, active, add, remove, setActive, updateName, refresh }}
+      value={{
+        instances,
+        activeId,
+        active,
+        add,
+        remove,
+        setActive,
+        updateName,
+        refresh,
+        refreshActiveCatalog,
+        reloadKey,
+      }}
     >
       {children}
     </InstancesContext.Provider>

@@ -18,7 +18,8 @@ export default function App() {
   const [updatePrompt, setUpdatePrompt] = useState<UpdatePromptInfo | null>(null);
   const [invite, setInvite] = useState<InviteRequest | null>(null);
   const [inviteProcessing, setInviteProcessing] = useState(false);
-  const { instances, activeId, active, setActive, add } = useInstances();
+  const { instances, activeId, active, setActive, add, refreshActiveCatalog } =
+    useInstances();
   const navigate = useNavigate();
 
   // useInstances() 의 instances/add 는 closure 안에서 stale 위험 — onOpenUrl 콜백은 한 번 등록
@@ -29,6 +30,8 @@ export default function App() {
   addRef.current = add;
   const setActiveRef = useRef(setActive);
   setActiveRef.current = setActive;
+  const refreshActiveCatalogRef = useRef(refreshActiveCatalog);
+  refreshActiveCatalogRef.current = refreshActiveCatalog;
   // "라이브러리" 그룹은 헤더 클릭으로 접었다 펼 수 있는 collapsible. 페이지 이동은 안 하고
   // 하위 인스턴스 항목 클릭이 navigation 트리거. 사용자 선호는 localStorage 에 저장.
   const [libraryExpanded, setLibraryExpanded] = useState<boolean>(() => {
@@ -123,6 +126,11 @@ export default function App() {
         await instanceToken.save(entry.id, invite.token);
       }
       setActiveRef.current(entry.id);
+      // alreadyExists 케이스: active id 가 안 변하므로 PspLibrary 의 useEffect 가
+      // trigger 안 됨 — 화면이 옛 데이터/옛 토큰으로 stale. 명시 reload 로 새 토큰 fetch 강제.
+      // 새 가입 케이스도 호출해도 무해 (id 변경으로 이미 trigger + reloadKey 도 trigger 면
+      // React batching 으로 1번 실행).
+      refreshActiveCatalogRef.current();
       setInvite(null);
       navigate("/");
     } catch (e) {
