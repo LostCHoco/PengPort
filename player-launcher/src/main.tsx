@@ -6,6 +6,7 @@ import PspLibrary from "./pages/PspLibrary";
 import Settings from "./pages/Settings";
 import ThirdPartyApps from "./pages/ThirdPartyApps";
 import { InstancesProvider } from "./lib/instances-context";
+import { ModeProvider } from "./lib/mode-context";
 import "./index.css";
 
 const router = createHashRouter([
@@ -22,8 +23,10 @@ const router = createHashRouter([
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <InstancesProvider>
-      <RouterProvider router={router} />
-    </InstancesProvider>
+    <ModeProvider>
+      <InstancesProvider>
+        <RouterProvider router={router} />
+      </InstancesProvider>
+    </ModeProvider>
   </React.StrictMode>,
 );

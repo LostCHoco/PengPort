@@ -184,15 +184,19 @@ fn keyring_clear(account: &str) -> Result<bool, String> {
 /// (%LOCALAPPDATA%\PengPort\EBWebView 등) 는 보존하므로, background batch 로 ALL_FS_IDENTIFIERS
 /// 의 user data 폴더들을 PengPort 종료 직후 자동 정리.
 ///
+/// `silent`: true 면 NSIS uninstaller 의 `/S` flag (silent uninstall) 사용 — 사용자에게 추가
+/// confirm dialog 없이 진행. ephemeral 모드 종료 시 자동 cleanup 흐름에 사용.
+///
 /// Windows 외 플랫폼에서는 미지원.
 #[tauri::command]
-pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
+pub async fn uninstall_self(app: AppHandle, silent: Option<bool>) -> Result<(), String> {
+    let silent = silent.unwrap_or(false);
     #[cfg(windows)]
     {
         let mut spawned_any = false;
         for product in paths::ALL_PRODUCT_NAMES {
             if let Some(unins) = locate_uninstaller_windows(product) {
-                if let Err(e) = spawn_uninstaller_windows(&unins) {
+                if let Err(e) = spawn_uninstaller_windows(&unins, silent) {
                     eprintln!("uninstaller spawn 실패 ({}): {e}", product);
                 } else {
                     spawned_any = true;
@@ -200,7 +204,15 @@ pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
             }
         }
         if !spawned_any {
-            return Err("uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string());
+            if silent {
+                // silent 호출 (ephemeral 모드 종료 cleanup 등) — uninstaller 없어도 wipe + exit
+                // 흐름 그대로 진행. dev 빌드 (NSIS 안 거침) 또는 portable 빌드에서도 정상 동작.
+                eprintln!(
+                    "uninstaller 위치 못 찾음 — silent 모드라 wipe/exit 만 진행 (NSIS 설치본 아닌 빌드)"
+                );
+            } else {
+                return Err("uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string());
+            }
         }
         // user data 폴더들을 5초 후 background 정리 — PengPort 종료 + webview2 자식 process 의
         // lock 풀릴 시간 확보. NSIS 의 Program Files 정리와 별개.
@@ -216,7 +228,7 @@ pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = (app, silent);
         Err("Windows 외 OS 미지원".to_string())
     }
 }
@@ -287,13 +299,17 @@ fn locate_uninstaller_windows(product: &str) -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn spawn_uninstaller_windows(unins: &std::path::Path) -> Result<(), String> {
+fn spawn_uninstaller_windows(unins: &std::path::Path, silent: bool) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS — 부모(우리)가 죽어도 NSIS 가 살아있게.
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    std::process::Command::new(unins)
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
+    let mut cmd = std::process::Command::new(unins);
+    if silent {
+        // NSIS 의 silent uninstall flag — 사용자 confirm dialog 없이 진행. ephemeral 모드 cleanup 용.
+        cmd.arg("/S");
+    }
+    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("uninstaller spawn 실패 ({}): {e}", unins.display()))

@@ -41,6 +41,7 @@ import {
 import { useInstances } from "@/lib/instances-context";
 import { instanceToken } from "@/lib/secrets";
 import { isSameOrigin } from "@/lib/url";
+import { getMode } from "@/lib/mode";
 
 // ====== 컴포넌트 상태 ======
 
@@ -89,12 +90,21 @@ export default function PspLibrary() {
 
   // PrismLauncher 설치 여부 — 1회 fetch 후 모든 ServiceCard 에 전달. 설치 dialog 가 끝나면
   // re-detect 해서 badge 갱신.
+  //
+  // ephemeral 모드 (1회용 PC) 에선 system Prism 을 사용하면 안 된다 — 다른 user 의 Microsoft
+  // 계정 데이터에 PengPort 가 기여하면 PC 떠난 후 그 사용자의 계정으로 minecraft 접속 가능
+  // (token 잔재). 그래서 ephemeral 시 bundled (PengPort 가 다운받은 격리된 prism) 만 인정 →
+  // bundled 없으면 ThirdPartyInstallDialog 가 download 트리거 → ephemeral 종료 시 같이 wipe.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const loc = await detectPrism();
-        if (!cancelled) setPrismInstalled(loc !== null);
+        if (!cancelled) {
+          const ephemeral = getMode() === "ephemeral";
+          const acceptable = loc !== null && (!ephemeral || loc.source === "bundled");
+          setPrismInstalled(acceptable);
+        }
       } catch {
         if (!cancelled) setPrismInstalled(false);
       }

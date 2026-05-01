@@ -9,7 +9,13 @@ import {
   type UpdatePromptInfo,
 } from "@/components/UpdatePromptDialog";
 import { InviteDialog, type InviteRequest } from "@/components/InviteDialog";
+import { ModeSelectorDialog } from "@/components/ModeSelectorDialog";
 import { instanceToken } from "@/lib/secrets";
+import { useMode } from "@/lib/mode-context";
+import { performWipe } from "@/lib/wipe";
+import { uninstallSelf } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const LS_LIBRARY_EXPANDED = "pengport.sidebar.library_expanded";
 
@@ -18,6 +24,50 @@ export default function App() {
   const [updatePrompt, setUpdatePrompt] = useState<UpdatePromptInfo | null>(null);
   const [invite, setInvite] = useState<InviteRequest | null>(null);
   const [inviteProcessing, setInviteProcessing] = useState(false);
+  // mode 상태는 context. Settings 도 같은 source 공유 (mode 변경 UI 가 거기 있음).
+  const { mode, setMode } = useMode();
+  // ephemeral 종료 confirm dialog. close 시 mode==='ephemeral' 이면 표시.
+  const [ephemeralExit, setEphemeralExit] = useState<
+    | { kind: "asking" }
+    | { kind: "wiping" }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+
+  // ephemeral 모드 시 window close 가로채서 confirm dialog 표시.
+  // 일반 모드면 normal close — listener 등록 안 함.
+  useEffect(() => {
+    if (mode !== "ephemeral") return;
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      unlisten = await win.onCloseRequested((event) => {
+        // 진행 중 (wiping) 이면 중복 dialog 방지 — close 그냥 무시.
+        event.preventDefault();
+        setEphemeralExit((cur) => cur ?? { kind: "asking" });
+      });
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [mode]);
+
+  const onEphemeralExitCancel = useCallback(() => {
+    setEphemeralExit(null);
+  }, []);
+
+  const onEphemeralExitConfirm = useCallback(async () => {
+    setEphemeralExit({ kind: "wiping" });
+    try {
+      await performWipe();
+      // uninstall_self silent — NSIS uninstaller /S flag + background user data cleanup +
+      // 자체 process exit. 이 함수 호출 후 PengPort process 가 곧 종료됨.
+      await uninstallSelf({ silent: true });
+      // 위 호출 후 곧 exit 되니 이 줄은 도달 안 함.
+    } catch (e) {
+      setEphemeralExit({ kind: "error", message: String(e) });
+    }
+  }, []);
   const { instances, activeId, active, setActive, add, refreshActiveCatalog } =
     useInstances();
   const navigate = useNavigate();
@@ -218,9 +268,15 @@ export default function App() {
             <SidebarLink to="/settings">설정</SidebarLink>
           </div>
         </nav>
-        {version && (
-          <div className="border-t border-neutral-800 px-5 py-3 text-[11px] text-neutral-500">
-            v{version}
+        {(version || mode === "ephemeral") && (
+          <div className="border-t border-neutral-800 px-5 py-3 text-[11px]">
+            {mode === "ephemeral" && (
+              <div className="mb-1 inline-flex items-center gap-1 rounded bg-amber-900/40 px-1.5 py-0.5 text-amber-200">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden />
+                <span>1회용 모드</span>
+              </div>
+            )}
+            {version && <div className="text-neutral-500">v{version}</div>}
           </div>
         )}
       </aside>
@@ -238,6 +294,80 @@ export default function App() {
         onDecline={handleInviteDecline}
         processing={inviteProcessing}
       />
+      {mode === null && <ModeSelectorDialog onSelect={setMode} />}
+      <EphemeralExitDialog
+        state={ephemeralExit}
+        onCancel={onEphemeralExitCancel}
+        onConfirm={onEphemeralExitConfirm}
+      />
+    </div>
+  );
+}
+
+function EphemeralExitDialog({
+  state,
+  onCancel,
+  onConfirm,
+}: {
+  state:
+    | { kind: "asking" }
+    | { kind: "wiping" }
+    | { kind: "error"; message: string }
+    | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!state) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="w-full max-w-md rounded-lg border border-amber-900/60 bg-neutral-900 p-6 shadow-2xl">
+        <h3 className="text-lg font-semibold text-amber-200">
+          1회용 모드 종료
+        </h3>
+        <div className="mt-3 space-y-2 text-sm text-neutral-300">
+          <p>
+            PengPort 를 종료하면 이 PC 의 모든 데이터 (인스턴스 / 토큰 / Prism 계정 /
+            Minecraft 세이브 / 캐시) 와 PengPort 자체가{" "}
+            <span className="font-medium text-red-300">자동 정리</span>됩니다.
+          </p>
+          <p className="text-xs text-neutral-500">
+            다른 PC 에서 다시 사용하려면 PengPort 를 재설치하세요.
+          </p>
+          {state.kind === "wiping" && (
+            <p className="text-xs text-amber-200">
+              정리 중... PengPort 가 곧 닫힙니다.
+            </p>
+          )}
+          {state.kind === "error" && (
+            <p className="text-xs text-red-300" title={state.message}>
+              실패: {state.message.length > 200 ? state.message.slice(0, 200) + "..." : state.message}
+            </p>
+          )}
+        </div>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onCancel}
+            disabled={state.kind === "wiping"}
+            className="cursor-pointer"
+          >
+            취소 (계속 사용)
+          </Button>
+          <Button
+            size="sm"
+            onClick={onConfirm}
+            disabled={state.kind === "wiping"}
+            className="cursor-pointer bg-red-700 hover:bg-red-600 disabled:cursor-not-allowed"
+          >
+            종료 + 정리
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

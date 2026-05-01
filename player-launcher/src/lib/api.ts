@@ -108,7 +108,13 @@ export async function wipeAllData(req: {
   });
 }
 
-/** Windows NSIS uninstaller 실행 + 자체 종료. 반환 안 됨. */
-export async function uninstallSelf(): Promise<void> {
-  return await invoke<void>("uninstall_self");
+/**
+ * Windows NSIS uninstaller 실행 + 자체 종료. 반환 안 됨.
+ *
+ * `silent: true` 시 uninstaller 의 `/S` flag — 사용자 추가 confirm 없이 진행. ephemeral 모드
+ * 종료 시 자동 cleanup 흐름에 사용. 명시 [PengPort 삭제] 케이스는 사용자가 이미 confirm 받았으니
+ * silent 도 OK 이지만 기본값은 false (옛 호출자 호환).
+ */
+export async function uninstallSelf(opts?: { silent?: boolean }): Promise<void> {
+  return await invoke<void>("uninstall_self", { silent: opts?.silent });
 }

@@ -2,12 +2,12 @@ import { useState } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
-import { catalogCache, instanceCache, manifestCache } from "@/lib/psp";
-import { uninstallSelf, wipeAllData, type WipeReport } from "@/lib/api";
-import { loadInstances } from "@/lib/instances";
+import { uninstallSelf, type WipeReport } from "@/lib/api";
 import { useInstances } from "@/lib/instances-context";
 import { instanceToken } from "@/lib/secrets";
 import { buildInviteLandingUrl } from "@/lib/invite";
+import { performWipe } from "@/lib/wipe";
+import { useMode } from "@/lib/mode-context";
 
 type CheckState =
   | { kind: "idle" }
@@ -99,8 +99,144 @@ export default function Settings() {
 
       <InstancesSection />
 
+      <ModeSection />
+
       <DangerZone />
     </div>
+  );
+}
+
+// ====== 사용 모드 (1회용 vs 평소) ======
+
+function ModeSection() {
+  const { mode, setMode } = useMode();
+  const [confirming, setConfirming] = useState<"to_ephemeral" | "to_normal" | null>(null);
+
+  const onChangeRequest = (target: "to_ephemeral" | "to_normal") => {
+    setConfirming(target);
+  };
+
+  const onConfirmChange = () => {
+    if (confirming === "to_ephemeral") {
+      // 일반 → 1회용. localStorage 저장 안 함 (mode-context 의 정책). 종료 시 wipe 활성.
+      setMode("ephemeral");
+    } else if (confirming === "to_normal") {
+      // 1회용 → 일반. localStorage 에 저장. 종료 시 wipe 안 함.
+      setMode("normal");
+    }
+    setConfirming(null);
+  };
+
+  const isEphemeral = mode === "ephemeral";
+
+  return (
+    <section
+      className={`space-y-3 rounded-lg border ${
+        isEphemeral
+          ? "border-amber-900/60 bg-amber-950/15"
+          : "border-neutral-800 bg-neutral-900/60"
+      } p-5`}
+    >
+      <div className="flex items-baseline justify-between">
+        <h3
+          className={`text-sm font-medium ${
+            isEphemeral ? "text-amber-200" : "text-neutral-200"
+          }`}
+        >
+          사용 모드
+        </h3>
+        <span
+          className={`text-[11px] ${
+            isEphemeral ? "text-amber-300/70" : "text-neutral-500"
+          }`}
+        >
+          현재: {isEphemeral ? "1회용 (공용 PC)" : "평소 (내 PC)"}
+        </span>
+      </div>
+
+      {!isEphemeral ? (
+        <>
+          <p className="text-xs text-neutral-400">
+            평소 모드 — 인스턴스 / 토큰 / Prism 계정 / 게임 세이브가 영구 저장됩니다.
+            공용 PC (PC방, 친구 PC) 에서 사용 중이면 1회용 모드로 변경 — 종료 시 모든 데이터와
+            PengPort 자체가 자동 정리됩니다.
+          </p>
+          {confirming !== "to_ephemeral" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onChangeRequest("to_ephemeral")}
+              className="cursor-pointer"
+            >
+              1회용 모드로 전환
+            </Button>
+          )}
+          {confirming === "to_ephemeral" && (
+            <div className="space-y-2 rounded border border-amber-900/40 bg-neutral-900/40 p-3">
+              <p className="text-xs text-amber-200">
+                1회용 모드로 전환하면 PengPort 종료 시 모든 데이터 + PengPort 자체가 자동 정리됩니다.
+                자기 PC 라면 [취소] 하세요.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setConfirming(null)}
+                  className="cursor-pointer"
+                >
+                  취소
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={onConfirmChange}
+                  className="cursor-pointer bg-amber-700 hover:bg-amber-600"
+                >
+                  1회용으로 전환
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="text-xs text-amber-200/90">
+            1회용 모드 — 종료 시 모든 데이터 + PengPort 자체가 자동 정리됩니다. 자기 PC 라서
+            데이터를 보존하고 싶다면 평소 모드로 변경하세요. 변경하면 종료 시 자동 정리 안 됩니다.
+          </p>
+          {confirming !== "to_normal" && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onChangeRequest("to_normal")}
+              className="cursor-pointer"
+            >
+              평소 모드로 전환
+            </Button>
+          )}
+          {confirming === "to_normal" && (
+            <div className="space-y-2 rounded border border-neutral-700 bg-neutral-900/40 p-3">
+              <p className="text-xs text-neutral-300">
+                평소 모드로 전환 — 현재 데이터 (인스턴스 / 토큰 등) 가 영구 저장됩니다. 공용 PC
+                라면 [취소] 하세요.
+              </p>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setConfirming(null)}
+                  className="cursor-pointer"
+                >
+                  취소
+                </Button>
+                <Button size="sm" onClick={onConfirmChange} className="cursor-pointer">
+                  평소 모드로 전환
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -262,35 +398,11 @@ function ResetCard() {
   const onConfirm = async () => {
     setState({ kind: "running" });
     try {
-      // 1) Rust 측 native state wipe (keyring + files + prism instances).
-      //    호출 직전에 instance ids / prism instance ids 를 모음.
-      const liveInstances = loadInstances();
-      const instanceIds = liveInstances.map((i) => i.id);
-      // 현 PSP 카탈로그 service id 를 prism_instance_id 로 사용 — 이상적으로는 fetch 한
-      // catalog 에서 가져와야 하지만, 대략 두 시나리오 대응:
-      // (a) 자주 쓰는 service id 들을 후보로 시도 (없으면 무시).
-      // (b) 직전 fetch 의 catalogCache 를 조회.
-      // 단순화 — service id 를 프론트에서 알 수 없으니 instance id 를 그대로 시도.
-      // PengPort 가 쓰는 prism instance dir name 은 service id (modded-mc, rlcraft-mc 등).
-      // 미리 캐시된 카탈로그가 있으면 그 service ids 사용. 없으면 빈 배열 → Rust 가 skip.
-      const prismInstanceIds = collectPrismInstanceIdsFromCache();
-      const report = await wipeAllData({ instanceIds, prismInstanceIds });
-
-      // 2) Frontend localStorage 정리.
-      localStorage.removeItem("pengport.instances");
-      localStorage.removeItem("pengport.active_instance_id");
-      localStorage.removeItem("pengport.instance_url");
-
-      // 3) PSP 메모리 캐시 정리 — fetch 한 catalog/manifest/instance 모두 비움.
-      //    안 하면 사이드바/PspLibrary 가 stale 데이터 표시.
-      catalogCache.clear();
-      manifestCache.clear();
-      instanceCache.clear();
-
-      // 4) context state 동기화 — instances list + active 모두 빈 상태로.
+      // native + frontend 통합 wipe — keyring, 파일시스템, localStorage, PSP 캐시.
+      const report = await performWipe();
+      // context state 동기화 — instances list + active 모두 빈 상태로.
       setActive(null);
       refresh();
-
       setState({ kind: "done", report });
     } catch (e) {
       setState({ kind: "error", message: String(e) });
@@ -370,22 +482,6 @@ function ResetCard() {
       )}
     </div>
   );
-}
-
-/**
- * PSP catalog cache 에 있는 service id 들 (= Prism instance dir name).
- * cache 가 비어있으면 (앱 시작 후 PspLibrary 미방문) 빈 배열 — Rust 측이 prism instance
- * 정리는 skip 하고 다른 state 만 wipe. 사용자가 wipe 직전 라이브러리를 한 번이라도
- * 봤으면 catalog 가 캐시되어 있어 prism 폴더도 같이 정리됨.
- */
-function collectPrismInstanceIdsFromCache(): string[] {
-  const seen = new Set<string>();
-  for (const cat of catalogCache.values()) {
-    for (const s of cat.services) {
-      seen.add(s.id);
-    }
-  }
-  return [...seen];
 }
 
 // --- PengPort 자체 삭제 ---
