@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::actions::third_party::prism_launcher::{PrismLauncherConfig, PrismLoader};
+use crate::ids::{validate_service_id, IdError};
 use crate::servers_dat;
 
 #[derive(Debug, Error)]
@@ -26,6 +27,14 @@ pub enum PrismError {
 
     #[error("servers.dat 갱신 실패: {0}")]
     ServersDat(#[from] servers_dat::ServersDatError),
+
+    /// Path traversal 차단 — 외부에서 받은 instance_id 가 fs 안전 형식이 아님.
+    #[error("instance_id 형식 오류 ({id:?}): {source}")]
+    InvalidInstanceId {
+        id: String,
+        #[source]
+        source: IdError,
+    },
 }
 
 /// Prism 설치 위치를 추상화. `instances` 폴더만 필요.
@@ -39,7 +48,19 @@ impl PrismPaths {
         Self { instances }
     }
 
+    /// `instances/<id>/` 경로. id 가 fs-safe 라는 invariant 가 지켜진다고 가정.
+    /// invariant 위반 시 debug 빌드는 panic, release 는 instances 폴더 자체로 fallback
+    /// (최악의 경우라도 traversal 차단). 호출자는 항상 validate_service_id 통과한 id 만 넘겨야.
     pub fn instance_dir(&self, id: &str) -> PathBuf {
+        debug_assert!(
+            crate::ids::is_valid_service_id(id),
+            "instance_dir 가 unsafe id 를 받음: {id:?} — 호출자가 validate_service_id 누락"
+        );
+        if !crate::ids::is_valid_service_id(id) {
+            // release 빌드의 최후 방어선 — invalid id 는 instances 폴더 자체로 mapping 되어 그
+            // 안에서 어떤 작업이든 안전한 곳에 머무름.
+            return self.instances.clone();
+        }
         self.instances.join(id)
     }
 }
@@ -60,6 +81,12 @@ pub fn upsert_prism_instance(
     config: &PrismLauncherConfig,
     bootstrap_jar: &Path,
 ) -> Result<InstanceOutcome, PrismError> {
+    // 첫 방어선: instance_id 가 fs-safe 형식인지 확인. 통과 못 하면 어떤 fs 작업도 안 함.
+    validate_service_id(instance_id).map_err(|source| PrismError::InvalidInstanceId {
+        id: instance_id.to_string(),
+        source,
+    })?;
+
     let display = config
         .display_name
         .as_deref()
@@ -249,6 +276,32 @@ mod tests {
 
         let outcome2 = upsert_prism_instance(&paths, "modded", &cfg, &jar).unwrap();
         assert_eq!(outcome2, InstanceOutcome::Unchanged);
+    }
+
+    #[test]
+    fn upsert_prism_instance_rejects_path_traversal_id() {
+        // 보안: attacker manifest 가 service.id 로 path traversal 시도해도 fs 작업 차단.
+        let instances_dir = temp_dir("upsert-prism-traversal");
+        let paths = PrismPaths::new(instances_dir.clone());
+        let jar = temp_dir("upsert-prism-tjar").join("bootstrap.jar");
+        fs::write(&jar, b"dummy").unwrap();
+
+        let cfg = sample_prism_config(PrismLoader::Vanilla, "1.21.1", None);
+
+        for evil in ["../../etc", "..", "foo/bar", "foo\\bar", "", "foo*bar"] {
+            let r = upsert_prism_instance(&paths, evil, &cfg, &jar);
+            assert!(
+                matches!(r, Err(PrismError::InvalidInstanceId { .. })),
+                "expected InvalidInstanceId for {evil:?}, got {:?}",
+                r
+            );
+        }
+
+        // 폴더 자체가 안 만들어졌는지 — fs 작업이 검증 통과 전에 abort.
+        assert!(
+            !instances_dir.join("..").join("etc").exists(),
+            "traversal 시도가 instances 외부 폴더를 만들면 안 됨"
+        );
     }
 
     #[test]

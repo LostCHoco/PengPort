@@ -101,12 +101,29 @@ pub async fn psp_load_catalog(
     catalog_url: String,
     bearer_token: Option<String>,
 ) -> Result<ServicesCatalog, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    let mut catalog = tauri::async_runtime::spawn_blocking(move || {
         fetch_services_catalog(&catalog_url, bearer_token.as_deref(), HTTP_TIMEOUT)
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("blocking task panic: {e}"))?
+    .map_err(|e| format!("blocking task panic: {e}"))??;
+
+    // 보안: catalog 의 service.id 가 fs-safe 형식이 아니면 entry 자체를 제거.
+    // service id 는 Prism instance dir name + maintenance 의 path component 로 쓰이므로
+    // path traversal 차단을 위해 이 단계에서 sanitize. invalid id 는 사용자에게 표시도 안 함.
+    catalog.services.retain(|s| {
+        if pengport_shared::is_valid_service_id(&s.id) {
+            true
+        } else {
+            eprintln!(
+                "PSP catalog: service id {:?} 가 fs-safe 형식이 아니라 거부 (path traversal 방지)",
+                s.id
+            );
+            false
+        }
+    });
+
+    Ok(catalog)
 }
 
 // ===== Validate =====
@@ -229,6 +246,12 @@ async fn invoke_third_party(
     instance_id: String,
     app: &tauri::AppHandle,
 ) -> Result<ActionOutcome, String> {
+    // 보안 1차 방어선: instance_id (= PSP service id) 가 fs-safe 형식인지.
+    // catalog 가 attacker-controlled 이므로 service.id 도 attacker-controlled. 이 id 가
+    // upsert_prism_instance / spawn_prism_instance 의 path component 로 쓰이므로 traversal 차단.
+    pengport_shared::validate_service_id(&instance_id)
+        .map_err(|e| format!("service id 형식 오류 ({instance_id:?}): {e}"))?;
+
     // Phase 1 카탈로그: prism-launcher 만.
     if intent.app_id != "prism-launcher" {
         return Err(format!(

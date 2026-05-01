@@ -11,10 +11,12 @@
 //! 옛 servers.toml 흐름 (`servers`, `cdn`, `status`) 은 PSP 단방향 마이그레이션과 함께 제거됨.
 
 pub mod actions;
+pub mod ids;
 pub mod prism;
 pub mod psp;
 pub mod servers_dat;
 pub mod trust;
 
+pub use ids::{is_valid_service_id, validate_service_id, IdError};
 pub use prism::{upsert_prism_instance, InstanceOutcome, PrismError, PrismPaths};
 pub use servers_dat::{upsert_server as upsert_servers_dat, ServersDat, ServersDatError};

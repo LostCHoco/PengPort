@@ -40,6 +40,7 @@ import {
 } from "@/lib/psp";
 import { useInstances } from "@/lib/instances-context";
 import { instanceToken } from "@/lib/secrets";
+import { isSameOrigin } from "@/lib/url";
 
 // ====== 컴포넌트 상태 ======
 
@@ -71,7 +72,7 @@ interface ToastState {
 }
 
 export default function PspLibrary() {
-  const { active, updateName } = useInstances();
+  const { active, updateName, reloadKey } = useInstances();
   const [state, setState] = useState<LoadState>({ kind: "needs_setup" });
   const [invokingActionId, setInvokingActionId] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -115,6 +116,18 @@ export default function PspLibrary() {
         instanceCache.set(instanceUrl, instance);
 
         const catalogUrl = instance.endpoints.catalog;
+
+        // 보안: catalog URL 이 instance origin 과 같은 origin 인지 검증.
+        // 다르면 token 이 cross-origin 으로 누출됨 (e.g. attacker instance 가
+        // endpoints.catalog 를 다른 도메인으로 가리키게 해서 그 도메인이 token 받음).
+        // PSP 의 same-origin policy 강제 — catalog 는 instance 의 일부여야 한다.
+        if (!isSameOrigin(instanceUrl, catalogUrl)) {
+          throw new Error(
+            `보안 차단: catalog URL (${catalogUrl}) 이 instance origin (${instanceUrl}) 과 다른 origin 입니다. ` +
+              `토큰 누출 위험으로 fetch 거부. 운영자에게 instance metadata 의 endpoints.catalog 확인 요청 필요.`,
+          );
+        }
+
         const catalog: ServicesCatalog =
           catalogCache.get(catalogUrl) ??
           (await pspLoadCatalog(catalogUrl, bearerToken ?? undefined));
@@ -156,6 +169,7 @@ export default function PspLibrary() {
   // active instance 가 바뀔 때마다 reload.
   // 의존성은 id/url primitive 만 (active object 자체는 매 render 새 reference 라
   // useEffect 무한 루프 유발 — instance list 변경 → active 재계산 → 재 fetch → ...).
+  // reloadKey 는 같은 active 안에서도 강제 재fetch 가 필요한 시나리오 (토큰 갱신 등) 의 trigger.
   const activeIdDep = active?.id ?? null;
   const activeUrlDep = active?.url ?? null;
   useEffect(() => {
@@ -164,7 +178,7 @@ export default function PspLibrary() {
       return;
     }
     void loadFromInstance(activeIdDep, activeUrlDep);
-  }, [activeIdDep, activeUrlDep, loadFromInstance]);
+  }, [activeIdDep, activeUrlDep, reloadKey, loadFromInstance]);
 
   // catalog 로드 성공 시 instance metadata 의 name 을 사이드바 표시용으로 자동 채움.
   // useEffect 분리: loadFromInstance 안에서 직접 호출하면 updateName → instances state 변경

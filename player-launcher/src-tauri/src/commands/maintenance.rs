@@ -23,10 +23,16 @@ use super::{paths, prism};
 /// `instance_id` 는 PSP service id (= Prism instance dir name). 이 폴더 안에는 Minecraft
 /// 의 saves/ 등 사용자 데이터도 있으므로 호출자가 frontend 에서 명시적 confirm 후 호출할 것.
 ///
+/// 보안: instance_id 는 외부 (catalog) controlled 이므로 validate_service_id 통과 강제.
+/// 미통과 시 즉시 거부 — path traversal 로 임의 폴더 삭제 차단.
+///
 /// Prism 본체나 다른 instance 폴더는 건드리지 않음. Bundled vs system Prism 구분 없이
 /// 현재 active prism_paths 의 instances/ 아래에서 동작.
 #[tauri::command]
 pub async fn remove_prism_instance(instance_id: String) -> Result<(), String> {
+    pengport_shared::validate_service_id(&instance_id)
+        .map_err(|e| format!("instance_id 형식 오류 ({instance_id:?}): {e}"))?;
+
     let (_, prism_paths) = prism::prism_paths()?;
     let dir = prism_paths.instance_dir(&instance_id);
     if !dir.exists() {
@@ -101,9 +107,18 @@ pub async fn wipe_all_data(req: WipeRequest) -> Result<WipeReport, String> {
     // 2) Prism 인스턴스 폴더들 (PengPort 가 만든 것).
     //    Prism 자체가 시스템에 없으면 지울 인스턴스 폴더도 없으므로 silent skip — failures 에
     //    추가하면 사용자에게 "실패" 로 보여 혼란.
+    //
+    //    보안: 각 id 는 path traversal 차단 위해 validate_service_id 통과 강제.
+    //    미통과 id 는 failures 에 기록하고 skip.
     if !req.prism_instance_ids.is_empty() {
         if let Ok((_, prism_paths)) = prism::prism_paths() {
             for id in &req.prism_instance_ids {
+                if let Err(e) = pengport_shared::validate_service_id(id) {
+                    report
+                        .failures
+                        .push(format!("prism instance '{id}' (id 형식 오류): {e}"));
+                    continue;
+                }
                 let dir = prism_paths.instance_dir(id);
                 if dir.exists() {
                     if let Err(e) = std::fs::remove_dir_all(&dir) {

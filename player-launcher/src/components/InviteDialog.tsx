@@ -69,7 +69,7 @@ export function InviteDialog({ request, onAccept, onDecline, processing = false 
         onClick={(e) => e.stopPropagation()}
       >
         <h3 id="invite-title" className="text-lg font-semibold text-neutral-50">
-          {request.alreadyExists ? "토큰 갱신" : "PengPort 인스턴스 가입"}
+          {request.alreadyExists ? "토큰 갱신 — 신중" : "PengPort 인스턴스 가입"}
         </h3>
 
         <div className="mt-3 space-y-3 text-sm text-neutral-300">
@@ -77,7 +77,7 @@ export function InviteDialog({ request, onAccept, onDecline, processing = false 
             {request.alreadyExists ? (
               <>
                 <span className="font-mono text-emerald-300">{origin}</span> 의 기존
-                토큰을 새 토큰으로 갱신합니다.
+                토큰을 <span className="font-medium text-red-300">덮어씁니다</span>.
               </>
             ) : (
               <>
@@ -93,9 +93,23 @@ export function InviteDialog({ request, onAccept, onDecline, processing = false 
             <div className="mt-0.5 font-mono text-neutral-200">{masked}</div>
           </div>
 
-          <p className="text-xs text-amber-200/80">
-            운영자가 직접 보낸 링크인지 확인하세요. 모르는 출처의 초대 링크는 거부하세요.
-          </p>
+          {request.alreadyExists ? (
+            // 보안 경고: 같은 URL 의 token silent overwrite 는 phishing 표적.
+            // 운영자가 새 토큰을 명시적으로 보낸 게 아닌데 사용자가 무심코 [갱신] 누르면
+            // 공격자 토큰으로 통신하게 됨 → 빨간 경고 박스로 강조.
+            <div className="rounded border border-red-900/60 bg-red-950/40 p-3 text-xs text-red-200">
+              <p className="font-medium">⚠ 신중히 확인</p>
+              <p className="mt-1">
+                이 인스턴스는 이미 등록되어 있습니다. 갱신하면 <span className="font-medium">기존 토큰은 사라지고</span>{" "}
+                새 토큰으로 통신합니다. 운영자가 직접 "토큰을 갱신했다" 고 안내한 경우만
+                진행하세요. 그렇지 않다면 누군가 운영자를 사칭한 phishing 일 수 있습니다.
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-amber-200/80">
+              운영자가 직접 보낸 링크인지 확인하세요. 모르는 출처의 초대 링크는 거부하세요.
+            </p>
+          )}
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
