@@ -21,6 +21,11 @@ dist/
 # Claude Code 사용자 사적 설정
 .claude/
 
+# 프로젝트 문서 / Claude 컨텍스트 — git 추적 제외 (사적 운영 자료)
+docs/
+CLAUDE.md
+**/CLAUDE.md
+
 # Tauri 산출물 (커스텀 빌드 결과)
 src-tauri/target/
 src-tauri/gen/schemas/
