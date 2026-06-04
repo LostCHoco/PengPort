@@ -19,7 +19,7 @@ Prism 을 자동 탐색하며, 못 찾으면 OOBE 에서 안내한다 (Phase 3 �
     python scripts/build_client.py [--version v3]
 
 전제:
-- Rust toolchain + npm 설치되어 있어야 함
+- Rust toolchain + pnpm 설치되어 있어야 함
 - `.secrets/pengport-updater.key` 가 있으면 자동 서명 (`.sig` 생성)
 """
 from __future__ import annotations
@@ -43,8 +43,8 @@ if sys.platform == "win32":
 ROOT = Path(__file__).resolve().parents[1]
 TAURI_CONF = ROOT / "player-launcher" / "src-tauri" / "tauri.conf.json"
 
-# Windows 의 npm 은 .cmd 파일이므로 subprocess 가 찾도록 확장자 명시.
-NPM = "npm.cmd" if sys.platform == "win32" else "npm"
+# Windows 의 pnpm 은 .cmd 파일이므로 subprocess 가 찾도록 확장자 명시.
+PNPM = "pnpm.cmd" if sys.platform == "win32" else "pnpm"
 
 # Self-hosted update endpoint. installer/sig/latest.json 모두 같은 디렉터리에 배치.
 # Caddy 가 file_server 로 정적 서빙 (public — PSP 정신상 client 는 software,
@@ -85,9 +85,9 @@ def build_tauri() -> Path:
     else:
         print(f"[signing] no key at {key_path} — unsigned build (NSIS .sig 생성 안됨)")
 
-    run_env([NPM, "install"], cwd=ROOT / "player-launcher", env=env)
+    run_env([PNPM, "install", "--frozen-lockfile"], cwd=ROOT / "player-launcher", env=env)
     # NSIS 만 빌드 (updater 는 NSIS 기반). MSI 는 필요 시 별도 target 로 추가.
-    run_env([NPM, "run", "tauri", "build", "--", "--bundles", "nsis"],
+    run_env([PNPM, "run", "tauri", "build", "--bundles", "nsis"],
             cwd=ROOT / "player-launcher", env=env)
     # Cargo crate 이름이 'pengport' 이라 산출물도 같은 이름.
     exe = ROOT / "target" / "release" / "pengport.exe"

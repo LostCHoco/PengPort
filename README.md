@@ -34,14 +34,14 @@
 
 ```bash
 cd player-launcher
-npm install
-npm run tauri dev
+pnpm install
+pnpm tauri dev
 ```
 
 로컬 개발 시 Prism 경로를 환경변수로 override:
 
 ```bash
-PENGPORT_PRISM_ROOT="C:/path/to/PrismLauncher" npm run tauri dev
+PENGPORT_PRISM_ROOT="C:/path/to/PrismLauncher" pnpm tauri dev
 ```
 
 ### 테스트

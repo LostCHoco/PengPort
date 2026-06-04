@@ -1,0 +1,8 @@
+# pnpm 빌드 스크립트 allow-list (pnpm 11 설정 위치).
+# pnpm 은 보안상 의존성 postinstall/build 스크립트를 기본 차단한다.
+# 명시 허용한 패키지만 빌드 스크립트 실행 — 새 패키지 추가 시 의도적으로 검토 후 true.
+# esbuild: vite 번들러, 플랫폼 네이티브 바이너리를 postinstall 로 받음 → 빌드 필수.
+# msw: 미사용 transitive(mock service worker) — 차단 유지.
+allowBuilds:
+  esbuild: true
+  msw: false

@@ -1,0 +1,11 @@
+# 전역 공유 target-dir(`C:/code/.cargo-target`) 예외.
+# scripts/build_client.py 와 release CI 가 repo-local `target/` 경로를 가정한다:
+#   exe  = ROOT/target/release/pengport.exe
+#   nsis = ROOT/target/release/bundle/nsis/...
+# 공유 target 으로 옮기면 이 경로들을 못 찾으므로 이 워크스페이스만 로컬로 되돌린다.
+# 상대경로 "target" 이라 portable: cargo 가 config 파일 위치 기준(= repo root)으로
+# 해석하므로 cwd 무관. 전역 공유설정 있는 머신은 로컬로 되돌리고, 없는 머신/CI 에선
+# 기본값(repo-local)과 동일한 no-op → 안전하게 commit 가능 (절대경로면 CI 가 깨짐).
+# rustc-wrapper = "sccache" 는 전역(~/.cargo/config.toml)에서 상속되어 그대로 적용.
+[build]
+target-dir = "target"
