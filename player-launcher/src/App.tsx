@@ -68,7 +68,7 @@ export default function App() {
       setEphemeralExit({ kind: "error", message: String(e) });
     }
   }, []);
-  const { instances, activeId, active, setActive, add, refreshActiveCatalog } =
+  const { instances, activeId, setActive, add, refreshActiveCatalog } =
     useInstances();
   const navigate = useNavigate();
 
@@ -201,9 +201,6 @@ export default function App() {
       <aside className="flex w-56 shrink-0 flex-col border-r border-neutral-800 bg-neutral-900/50">
         <div className="border-b border-neutral-800 px-5 py-4">
           <h1 className="text-lg font-semibold tracking-tight">PengPort</h1>
-          <p className="text-xs text-neutral-400">
-            {active?.name ?? active?.url ?? "통합 런처"}
-          </p>
         </div>
         <nav className="flex flex-1 flex-col gap-1 p-3">
           {/* 라이브러리 그룹 헤더 — 클릭 시 인스턴스 list 접기/펼치기. 페이지 이동 없음. */}
