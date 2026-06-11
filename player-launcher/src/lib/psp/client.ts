@@ -50,6 +50,18 @@ export async function pspLoadCatalog(
   });
 }
 
+/**
+ * 초대 코드 redeem (invite B). 안정적 INVITE_CODE 를 인스턴스의 현재 EVENTS_TOKEN 으로
+ * 교환. 토큰은 링크/URL 에 없고 이 호출로만 받음 → 사용자는 토큰을 보지 않음.
+ * 실패(코드 불일치/redeem 비활성) 시 throw.
+ */
+export async function pspRedeemInvite(
+  instanceUrl: string,
+  code: string,
+): Promise<string> {
+  return await invoke<string>("invite_redeem", { instanceUrl, code });
+}
+
 // ============================================================
 // Validate
 // ============================================================

@@ -11,6 +11,7 @@ import {
 import { InviteDialog, type InviteRequest } from "@/components/InviteDialog";
 import { ModeSelectorDialog } from "@/components/ModeSelectorDialog";
 import { instanceToken } from "@/lib/secrets";
+import { pspRedeemInvite } from "@/lib/psp/client";
 import { useMode } from "@/lib/mode-context";
 import { performWipe } from "@/lib/wipe";
 import { uninstallSelf } from "@/lib/api";
@@ -140,7 +141,7 @@ export default function App() {
       return;
     }
     const exists = instancesRef.current.some((i) => i.url === parsed.url);
-    setInvite({ url: parsed.url, token: parsed.token, alreadyExists: exists });
+    setInvite({ url: parsed.url, code: parsed.code, alreadyExists: exists });
   }, []);
 
   // mount 시 cold-start URL 확인 + onOpenUrl listener 등록.
@@ -169,11 +170,15 @@ export default function App() {
     if (!invite) return;
     setInviteProcessing(true);
     try {
+      // invite B: 먼저 code 를 redeem 해서 현재 토큰을 받는다. 실패(코드 불일치/redeem
+      // 비활성) 시 throw → 인스턴스를 추가하지 않고 catch 로 빠짐 (부분 상태 방지).
+      // 사용자는 토큰을 끝까지 보지 않음 — code→token 교환은 전부 내부.
+      const token = await pspRedeemInvite(invite.url, invite.code);
       // 같은 URL 의 entry 가 이미 있으면 add() 가 그걸 재사용 + setActive 까지 함.
       // alreadyExists 든 아니든 add() 로 단일 흐름.
       const entry = addRef.current({ url: invite.url });
-      if (invite.token.length > 0) {
-        await instanceToken.save(entry.id, invite.token);
+      if (token.length > 0) {
+        await instanceToken.save(entry.id, token);
       }
       setActiveRef.current(entry.id);
       // alreadyExists 케이스: active id 가 안 변하므로 PspLibrary 의 useEffect 가
@@ -370,15 +375,17 @@ function EphemeralExitDialog({
 }
 
 /**
- * 초대 링크 파싱: `pengport://join?url=<encoded>&token=<encoded>`.
+ * 초대 링크 파싱: `pengport://join?url=<encoded>&code=<encoded>` (invite B).
  *
  * - host 부분 (`join`) 이 action selector. 향후 다른 action 추가 가능 (예: presence).
- * - url / token 은 percent-encoded — searchParams 가 자동 decode.
- * - url 은 https/http 만 허용 (다른 scheme 차단). token 은 빈 값도 허용 (auth.type=none 인 인스턴스 대응).
+ * - url / code 는 percent-encoded — searchParams 가 자동 decode.
+ * - url 은 https/http 만 허용 (다른 scheme 차단).
+ * - **토큰은 링크에 없음** — 가입 시 `code` 를 gateway 에 redeem 해서 현재 토큰을 받는다
+ *   (invite B: 토큰이 URL/로그/사용자 눈에 안 나타남). code 빈 값도 파싱은 되지만 redeem 에서 거부.
  *
  * 검증 실패 시 null — 호출자가 무시.
  */
-function parseInviteUrl(raw: string): { url: string; token: string } | null {
+function parseInviteUrl(raw: string): { url: string; code: string } | null {
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -392,7 +399,7 @@ function parseInviteUrl(raw: string): { url: string; token: string } | null {
   if (action !== "join") return null;
 
   const target = parsed.searchParams.get("url");
-  const token = parsed.searchParams.get("token") ?? "";
+  const code = parsed.searchParams.get("code") ?? "";
   if (!target) return null;
   try {
     const t = new URL(target);
@@ -401,7 +408,7 @@ function parseInviteUrl(raw: string): { url: string; token: string } | null {
     // 인식되어야 함 (instances.ts 의 URL 비교는 string 정확 일치). 대부분 사용자 입력이
     // trailing slash 없는 형태라 그쪽으로 통일.
     const normalized = t.origin + (t.pathname === "/" ? "" : t.pathname);
-    return { url: normalized, token: token.trim() };
+    return { url: normalized, code: code.trim() };
   } catch {
     return null;
   }

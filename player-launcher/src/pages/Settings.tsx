@@ -1,11 +1,8 @@
 import { useState } from "react";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Button } from "@/components/ui/button";
 import { checkForUpdate, type UpdateInfo } from "@/lib/updater";
 import { uninstallSelf, type WipeReport } from "@/lib/api";
 import { useInstances } from "@/lib/instances-context";
-import { instanceToken } from "@/lib/secrets";
-import { buildInviteLandingUrl } from "@/lib/invite";
 import { performWipe } from "@/lib/wipe";
 import { useMode } from "@/lib/mode-context";
 
@@ -240,13 +237,17 @@ function ModeSection() {
   );
 }
 
-// ====== 인스턴스 관리 (등록한 PengPort 인스턴스 제거 + 초대 링크 복사) ======
-
-type CopyState = { id: string; kind: "ok" | "error"; message: string } | null;
+// ====== 인스턴스 관리 (등록한 PengPort 인스턴스 제거) ======
+//
+// 초대 링크 *생성* 은 여기서 하지 않는다 (invite B). 초대는 운영자 권한이고, 링크에는
+// gateway config 인 `INVITE_CODE` 가 필요한데 일반 멤버 클라이언트는 그 코드를 모른다
+// (EVENTS_TOKEN=서비스 사용, INVITE_CODE=초대 — 능력 분리). 운영자는 안정적 초대 링크
+// `<base>/invite#code=<INVITE_CODE>` 를 한 번 만들어 배포하면 회전과 무관하게 영구 유효.
+// 멤버에게 초대 생성 UI 를 노출하지 않아 무분별한 재초대(footgun)도 차단. per-user 신원
+// (북극성/OAuth) 도입 전까지 클라가 운영자를 암호학적으로 구분 못 하므로 가장 정직한 처리.
 
 function InstancesSection() {
   const { instances, remove } = useInstances();
-  const [copyState, setCopyState] = useState<CopyState>(null);
 
   const onRemove = async (id: string, label: string) => {
     const ok = confirm(
@@ -257,31 +258,6 @@ function InstancesSection() {
     await remove(id);
   };
 
-  // 초대 링크 복사: 그 인스턴스의 keyring token 으로 `pengport://join?...` 생성.
-  // 토큰이 없으면 (auth.type=none 이거나 미저장) token=빈 값으로 생성.
-  // 사용자에게 "토큰이 평문 포함" 경고를 한 번 보여주고 진행 — 친구 그룹 / 반신뢰 모델 가정.
-  const onCopyInvite = async (id: string, url: string) => {
-    setCopyState(null);
-    try {
-      const token = (await instanceToken.load(id)) ?? "";
-      if (token.length > 0) {
-        const ok = confirm(
-          "이 초대 링크에는 인스턴스 토큰이 평문으로 포함됩니다.\n\n" +
-            "신뢰하는 친구에게만 1:1 로 전달하세요. 공개 채널 (오픈 채팅, 공개 게시판 등)\n" +
-            "에 올리지 마세요.\n\n계속할까요?",
-        );
-        if (!ok) return;
-      }
-      // HTTPS landing 형식 — 디스코드/카톡 등 메시지 앱에서 자동 hyperlink.
-      // gateway 의 `/invite` 가 meta refresh 로 `pengport://join?...` 로 redirect.
-      const inviteUrl = buildInviteLandingUrl({ url, token });
-      await writeText(inviteUrl);
-      setCopyState({ id, kind: "ok", message: "초대 링크 복사됨 (디스코드/카톡 가능)" });
-    } catch (e) {
-      setCopyState({ id, kind: "error", message: String(e) });
-    }
-  };
-
   return (
     <section className="space-y-3 rounded-lg border border-neutral-800 bg-neutral-900/60 p-5">
       <div className="flex items-baseline justify-between">
@@ -290,9 +266,8 @@ function InstancesSection() {
       </div>
 
       <p className="text-xs text-neutral-400">
-        제거하면 사이드바에서 사라지고, 다음에 같은 URL 로 다시 추가할 때 토큰을 새로
-        입력해야 합니다. <span className="text-neutral-300">초대 링크</span> 는 친구가
-        클릭하면 PengPort 가 자동으로 가입 dialog 를 띄웁니다.
+        제거하면 사이드바에서 사라지고, 다음에 같은 URL 로 다시 추가할 때 운영자가 보낸
+        초대 링크로 다시 가입하면 됩니다.
       </p>
 
       {instances.length === 0 ? (
@@ -301,7 +276,6 @@ function InstancesSection() {
         <ul className="space-y-2">
           {instances.map((inst) => {
             const label = inst.name ?? inst.url;
-            const note = copyState?.id === inst.id ? copyState : null;
             return (
               <li
                 key={inst.id}
@@ -318,31 +292,12 @@ function InstancesSection() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => void onCopyInvite(inst.id, inst.url)}
-                    >
-                      초대 링크 복사
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
                       onClick={() => void onRemove(inst.id, label)}
                     >
                       제거
                     </Button>
                   </div>
                 </div>
-                {note && (
-                  <p
-                    className={
-                      note.kind === "ok"
-                        ? "text-[11px] text-emerald-300"
-                        : "text-[11px] text-red-300"
-                    }
-                  >
-                    {note.kind === "ok" ? "✓ " : "✗ "}
-                    {note.message}
-                  </p>
-                )}
               </li>
             );
           })}

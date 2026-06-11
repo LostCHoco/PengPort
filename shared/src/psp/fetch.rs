@@ -79,6 +79,61 @@ pub fn fetch_services_catalog(
     }
 }
 
+/// 초대 코드 redeem — `POST <base>/invite/redeem` `{"code": ...}` → 현재 EVENTS_TOKEN.
+///
+/// invite B: 안정적 `INVITE_CODE` 를 *현재* 토큰으로 교환. 토큰은 URL/링크에 일절
+/// 나타나지 않고 이 POST 응답 본문으로만 전달된다. 코드 불일치 → `Unauthorized`,
+/// redeem 비활성 인스턴스(INVITE_CODE 미설정) → `HttpStatus(404)`.
+pub fn redeem_invite(
+    instance_base_url: &str,
+    code: &str,
+    timeout: Duration,
+) -> Result<String, FetchError> {
+    if !instance_base_url.starts_with("http://") && !instance_base_url.starts_with("https://") {
+        return Err(FetchError::InvalidUrl(instance_base_url.to_string()));
+    }
+    let url = format!(
+        "{}/invite/redeem",
+        instance_base_url.trim_end_matches('/')
+    );
+
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .new_agent();
+
+    let body = serde_json::json!({ "code": code });
+    // ureq 의 http_status_as_error 기본값 차이를 양쪽 다 견고하게 처리:
+    // 4xx 가 Err(StatusCode) 로 오든, Ok 응답의 status 로 오든 동일하게 매핑.
+    let mut response = match agent.post(&url).send_json(&body) {
+        Ok(r) => r,
+        Err(ureq::Error::StatusCode(code)) => return Err(status_to_err(code)),
+        Err(e) => return Err(FetchError::Http(e.to_string())),
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return Err(status_to_err(status.as_u16()));
+    }
+
+    let parsed: RedeemResponse = response
+        .body_mut()
+        .read_json()
+        .map_err(|e| FetchError::Json(e.to_string()))?;
+    Ok(parsed.token)
+}
+
+fn status_to_err(code: u16) -> FetchError {
+    match code {
+        401 => FetchError::Unauthorized,
+        other => FetchError::HttpStatus(other),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RedeemResponse {
+    token: String,
+}
+
 fn build_well_known_url(base: &str, name: &str) -> Result<String, FetchError> {
     if !base.starts_with("http://") && !base.starts_with("https://") {
         return Err(FetchError::InvalidUrl(base.to_string()));

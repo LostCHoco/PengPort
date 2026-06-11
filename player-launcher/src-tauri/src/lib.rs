@@ -64,6 +64,7 @@ pub fn run() {
             commands::psp::psp_load_instance,
             commands::psp::psp_load_manifest,
             commands::psp::psp_load_catalog,
+            commands::psp::invite_redeem,
             commands::psp::psp_validate_manifest,
             commands::psp::psp_invoke_action,
             commands::psp::psp_submit_form_with_data,

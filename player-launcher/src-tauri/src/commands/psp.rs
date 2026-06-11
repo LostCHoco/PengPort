@@ -37,7 +37,7 @@ use pengport_shared::actions::third_party::prism_launcher::PrismLauncherConfig;
 use pengport_shared::actions::{dispatch, ActionContext, ActionIntent, ThirdPartyAppIntent};
 use pengport_shared::psp::catalog::ServicesCatalog;
 use pengport_shared::psp::fetch::{
-    fetch_instance_metadata, fetch_service_manifest, fetch_services_catalog,
+    fetch_instance_metadata, fetch_service_manifest, fetch_services_catalog, redeem_invite,
 };
 use pengport_shared::psp::manifest::NativeActionKind;
 use pengport_shared::psp::{InstanceMetadata, ServiceManifest};
@@ -124,6 +124,18 @@ pub async fn psp_load_catalog(
     });
 
     Ok(catalog)
+}
+
+/// 초대 코드 redeem — invite B. 안정적 `INVITE_CODE` 를 인스턴스의 현재 EVENTS_TOKEN 으로
+/// 교환. 토큰은 deep link/URL 에 없고 이 호출로만 받아 keychain 에 저장 → 사용자는 토큰을
+/// 끝까지 보지 않음. 실패(코드 불일치/redeem 비활성) 시 Err 메시지 반환.
+#[tauri::command]
+pub async fn invite_redeem(instance_url: String, code: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        redeem_invite(&instance_url, &code, HTTP_TIMEOUT).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e}"))?
 }
 
 // ===== Validate =====
