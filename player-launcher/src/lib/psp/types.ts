@@ -170,7 +170,18 @@ export interface StatusResponse {
   online: boolean;
   metrics: Metric[];
   badges: Badge[];
+  /** 현재 접속자 — service-native 신원. presence(모임 레이어) roster 소스.
+   * 옛 어댑터는 미전송 가능 → optional. */
+  present?: Present[];
   last_updated?: string;
+}
+
+/** presence 항목 — 현재 service 에 접속한 한 사람. service-native 신원.
+ * `id`/`label` 은 어댑터발 untrusted — 표시만 (React escape), fs/명령 사용 금지.
+ * forward-compatible: 미래 per-person 상세는 선택 필드로 추가. */
+export interface Present {
+  id: string;
+  label?: string;
 }
 
 /** `metric.type === "players"` 일 때 `metric.value` 의 형태. */

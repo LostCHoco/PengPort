@@ -17,6 +17,7 @@ import type {
   Badge as PspBadge,
   Metric,
   PlayersMetricValue,
+  Present,
   ServiceAction,
   ServiceManifest,
   StatusResponse,
@@ -326,6 +327,11 @@ export function ServiceCard({
         <MetricsList metrics={statusState.status.metrics} />
       )}
 
+      {statusState.kind === "ok" &&
+        (statusState.status.present?.length ?? 0) > 0 && (
+          <PresentChips present={statusState.status.present!} />
+        )}
+
       {statusState.kind === "ok" && statusState.status.badges.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {statusState.status.badges.map((b) => (
@@ -432,6 +438,26 @@ function MetricsList({ metrics }: { metrics: Metric[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+// 현재 접속자 — presence(모임 레이어)의 service-anchored 표시.
+// status.present (각 service 가 자기 status 로 보고) 를 client 가 칩으로 렌더만 한다.
+// PengPort 는 presence 를 호스팅하지 않음. 표시 전용 (합류는 Play 버튼). id/label 은
+// 어댑터발 untrusted — React 기본 escape 에 의존, 표시 외 사용 금지.
+function PresentChips({ present }: { present: Present[] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {present.map((p) => (
+        <span
+          key={p.id}
+          className="flex shrink-0 items-center gap-1.5 rounded-full bg-neutral-800 px-2.5 py-0.5 text-xs font-medium text-neutral-200"
+        >
+          <Dot className="bg-emerald-400" />
+          {p.label ?? p.id}
+        </span>
+      ))}
+    </div>
   );
 }
 

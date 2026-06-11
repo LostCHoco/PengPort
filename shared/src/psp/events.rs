@@ -77,6 +77,7 @@ mod tests {
             online: true,
             metrics: vec![],
             badges: vec![],
+            present: vec![],
             last_updated: None,
         });
         let json = serde_json::to_string(&ev).unwrap();
