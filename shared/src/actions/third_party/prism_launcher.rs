@@ -26,8 +26,11 @@ pub struct PrismLauncherConfig {
     #[serde(default)]
     pub loader_version: Option<String>,
 
+    /// 인증 팩 번들(tar.gz) URL. 런처가 EVENTS_TOKEN 으로 1회 인증 GET → 인스턴스
+    /// `.minecraft/.packwiz-src/` 에 추출 → 로컬 packwiz-installer 실행. overrides(제작자
+    /// 저작물)는 인증 채널로만 배포(공개 재배포 금지), mod jar 는 CF 공개 CDN.
     #[serde(default)]
-    pub packwiz_url: Option<String>,
+    pub pack_bundle_url: Option<String>,
 
     #[serde(default)]
     pub java_major: Option<u32>,
@@ -89,10 +92,10 @@ impl ThirdPartyAppIntegration for PrismLauncher {
             )));
         }
 
-        // packwiz_url 검증
-        if let Some(packwiz_url) = &cfg.packwiz_url {
+        // pack_bundle_url 검증 (same-origin — 매니페스트 origin 또는 external_urls 허용)
+        if let Some(pack_bundle_url) = &cfg.pack_bundle_url {
             is_url_allowed(
-                packwiz_url,
+                pack_bundle_url,
                 ctx.manifest_origin,
                 ctx.external_urls,
                 ctx.allow_http,
@@ -202,28 +205,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_packwiz_url_cross_origin() {
+    fn rejects_pack_bundle_url_cross_origin() {
         let cfg = json!({
             "host": "play.example.com",
             "port": 25565,
             "version": "1.21.1",
             "loader": "fabric",
             "loader_version": "0.18.4",
-            "packwiz_url": "https://evil.example/pack.toml"
+            "pack_bundle_url": "https://evil.example/pack.tar.gz"
         });
         let err = PrismLauncher.validate_config(&cfg, &ctx_no_external()).unwrap_err();
         assert!(matches!(err, ActionError::UrlCheck(_)));
     }
 
     #[test]
-    fn validates_packwiz_url_in_external_urls() {
+    fn validates_pack_bundle_url_in_external_urls() {
         let cfg = json!({
             "host": "play.example.com",
             "port": 25565,
             "version": "1.21.1",
             "loader": "fabric",
             "loader_version": "0.18.4",
-            "packwiz_url": "https://cdn.example.com/modded/pack.toml"
+            "pack_bundle_url": "https://cdn.example.com/pack/modded.tar.gz"
         });
         let urls = vec!["https://cdn.example.com/*".to_string()];
         let ctx = ActionContext {

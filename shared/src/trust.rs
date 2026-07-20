@@ -16,7 +16,7 @@
 //!       "subject_kind": "third_party.prism-launcher",
 //!       "subject_id": "play.example.com:25565",
 //!       "display": "PengDoll Modded",
-//!       "metadata": { "host": "...", "port": ..., "packwiz_url": "..." },
+//!       "metadata": { "host": "...", "port": ..., "pack_bundle_url": "..." },
 //!       "trusted_at": 1714200000
 //!     }
 //!   ]
@@ -36,7 +36,7 @@
 //! ## metadata 규약
 //!
 //! kind 별 추가 비교 키. confirm 트리거 정책에서 사용.
-//! - prism-launcher: `{ host, port, packwiz_url }` — packwiz_url 변경 시 재confirm
+//! - prism-launcher: `{ host, port, pack_bundle_url }` — pack_bundle_url 변경 시 재confirm
 
 use std::fs;
 use std::path::{Path, PathBuf};

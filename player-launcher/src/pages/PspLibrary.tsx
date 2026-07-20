@@ -217,9 +217,12 @@ export default function PspLibrary() {
         manifestOrigin: service.entry.url,
         externalUrls: service.manifest.permissions.external_urls,
         instanceId: service.entry.id,
+        // 인스턴스 토큰 — third_party 팩 번들 인증 다운로드용 (auth.type=token 인스턴스).
+        bearerToken:
+          state.kind === "ready" ? (state.bearerToken ?? undefined) : undefined,
       });
     },
-    [],
+    [state],
   );
 
   const handleOutcome = useCallback(

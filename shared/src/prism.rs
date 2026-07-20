@@ -96,10 +96,12 @@ pub fn upsert_prism_instance(
     let mc_dir = dir.join(".minecraft");
     fs::create_dir_all(&mc_dir)?;
 
-    // packwiz_url 이 없으면 PreLaunchCommand 없는 instance.cfg (vanilla 단순 실행).
-    let cfg = match config.packwiz_url.as_deref() {
-        Some(url) => render_instance_cfg(&display, url),
-        None => render_instance_cfg_no_packwiz(&display),
+    // pack_bundle_url 이 없으면 PreLaunchCommand 없는 instance.cfg (vanilla 단순 실행).
+    // 번들 다운로드·추출은 client(psp) 가 upsert 후 spawn 전에 수행(네트워크·토큰 필요).
+    let cfg = if config.pack_bundle_url.is_some() {
+        render_instance_cfg(&display)
+    } else {
+        render_instance_cfg_no_packwiz(&display)
     };
     let cfg_path = dir.join("instance.cfg");
     let cfg_changed = write_if_changed(&cfg_path, cfg.as_bytes())?;
@@ -112,8 +114,8 @@ pub fn upsert_prism_instance(
     let pack_path = dir.join("mmc-pack.json");
     let pack_changed = write_if_changed(&pack_path, pack.as_bytes())?;
 
-    // bootstrap jar — packwiz_url 이 있을 때만 필요.
-    if config.packwiz_url.is_some() {
+    // bootstrap jar — pack_bundle_url 이 있을 때만 필요.
+    if config.pack_bundle_url.is_some() {
         let jar_dst = mc_dir.join("packwiz-installer-bootstrap.jar");
         let needs_copy = match (fs::metadata(&jar_dst), fs::metadata(bootstrap_jar)) {
             (Ok(d), Ok(s)) => d.len() != s.len(),
@@ -146,14 +148,17 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, PrismError> {
     Ok(true)
 }
 
-fn render_instance_cfg(display_name: &str, packwiz_url: &str) -> String {
+fn render_instance_cfg(display_name: &str) -> String {
     // PreLaunchCommand 는 실행 시 `.minecraft/` 가 CWD 이므로 상대 경로.
+    // 팩은 런처가 인증 번들(pack_bundle_url)을 받아 `.minecraft/.packwiz-src/` 에 미리
+    // 추출한다(overrides=제작자 저작물이라 공개 재배포 금지 → 인증 채널로만). packwiz-installer
+    // 는 그 로컬 pack.toml 로 실행 → override는 그대로 검증, mod jar 만 CF 공개 CDN 에서 fetch.
     format!(
         "InstanceType=OneSix\n\
          iconKey=default\n\
          name={display_name}\n\
          OverrideCommands=true\n\
-         PreLaunchCommand=\"$INST_JAVA\" -jar packwiz-installer-bootstrap.jar {packwiz_url}\n"
+         PreLaunchCommand=\"$INST_JAVA\" -jar packwiz-installer-bootstrap.jar .packwiz-src/pack.toml\n"
     )
 }
 
@@ -251,7 +256,7 @@ mod tests {
             version: mc.into(),
             loader,
             loader_version: lv.map(String::from),
-            packwiz_url: Some("https://cdn.example.com/pack.toml".into()),
+            pack_bundle_url: Some("https://cdn.example.com/pack/example.tar.gz".into()),
             java_major: None,
             display_name: Some("Example".into()),
         }
@@ -312,7 +317,7 @@ mod tests {
         fs::write(&jar, b"dummy").unwrap();
 
         let mut cfg = sample_prism_config(PrismLoader::Vanilla, "1.21.1", None);
-        cfg.packwiz_url = None;
+        cfg.pack_bundle_url = None;
 
         let outcome = upsert_prism_instance(&paths, "vanilla-svr", &cfg, &jar).unwrap();
         assert_eq!(outcome, InstanceOutcome::Updated);

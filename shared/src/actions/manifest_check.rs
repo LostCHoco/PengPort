@@ -154,7 +154,7 @@ fn collect_urls(m: &ServiceManifest) -> Vec<(String, String)> {
                         homepage.to_string(),
                     ));
                 }
-                // config 안의 URL (예: prism-launcher 의 packwiz_url) 은
+                // config 안의 URL (예: prism-launcher 의 pack_bundle_url) 은
                 // third_party entry 가 자체 검증 (별도 라운드).
             }
             NativeActionKind::OpenProtocol => {

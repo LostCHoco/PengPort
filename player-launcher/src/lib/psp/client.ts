@@ -94,6 +94,8 @@ export interface InvokeActionInput {
   externalUrls: string[];
   /** third_party 분기에서만 의미. service id 그대로 전달 권고. */
   instanceId?: string;
+  /** 인스턴스 auth 토큰 (third_party 팩 번들 인증 다운로드에 사용). */
+  bearerToken?: string;
 }
 
 /**
@@ -113,6 +115,7 @@ export async function pspInvokeAction(
     manifestOrigin: input.manifestOrigin,
     externalUrls: input.externalUrls,
     instanceId: input.instanceId ?? null,
+    bearerToken: input.bearerToken ?? null,
   });
 }
 

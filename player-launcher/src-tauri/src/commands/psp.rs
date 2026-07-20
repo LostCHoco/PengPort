@@ -199,6 +199,7 @@ pub async fn psp_invoke_action(
     manifest_origin: String,
     external_urls: Vec<String>,
     instance_id: Option<String>,
+    bearer_token: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<ActionOutcome, String> {
     let kind_enum: NativeActionKind =
@@ -247,7 +248,7 @@ pub async fn psp_invoke_action(
             let instance_id = instance_id.ok_or_else(|| {
                 "third_party action 호출 시 instance_id 인자 필수".to_string()
             })?;
-            invoke_third_party(i, instance_id, &app).await
+            invoke_third_party(i, instance_id, bearer_token, &app).await
         }
     }
 }
@@ -256,6 +257,7 @@ pub async fn psp_invoke_action(
 async fn invoke_third_party(
     intent: ThirdPartyAppIntent,
     instance_id: String,
+    bearer_token: Option<String>,
     app: &tauri::AppHandle,
 ) -> Result<ActionOutcome, String> {
     // 보안 1차 방어선: instance_id (= PSP service id) 가 fs-safe 형식인지.
@@ -278,18 +280,18 @@ async fn invoke_third_party(
     let trust_kind = format!("third_party.{}", intent.app_id);
     let subject_id = format!("{}:{}", config.host, config.port);
 
-    // Trust check — host:port 일치 + packwiz_url 동일 시에만 trusted.
-    // packwiz_url 변경 = 코드 실행 출처 변경 → 재confirm (TOFU + identity-key 패턴).
+    // Trust check — host:port 일치 + pack_bundle_url 동일 시에만 trusted.
+    // pack_bundle_url 변경 = 코드 실행 출처 변경 → 재confirm (TOFU + identity-key 패턴).
     let store = load_trust_store().await?;
     let trusted = match store.find(&trust_kind, &subject_id) {
         Some(entry) => {
-            let stored_packwiz = entry
+            let stored_bundle = entry
                 .metadata
-                .get("packwiz_url")
+                .get("pack_bundle_url")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let current_packwiz = config.packwiz_url.clone();
-            stored_packwiz == current_packwiz
+            let current_bundle = config.pack_bundle_url.clone();
+            stored_bundle == current_bundle
         }
         None => false,
     };
@@ -306,7 +308,7 @@ async fn invoke_third_party(
             "version": config.version,
             "loader": config.loader,
             "loader_version": config.loader_version,
-            "packwiz_url": config.packwiz_url,
+            "pack_bundle_url": config.pack_bundle_url,
             "install_hint": intent.install_hint,
         });
         return Ok(ActionOutcome::NeedsConfirm {
@@ -331,6 +333,14 @@ async fn invoke_third_party(
     };
     let jar = super::prism::ensure_bootstrap_jar(app)?;
 
+    // 팩 번들 추출 경로 — upsert 가 prism_paths 를 move 로 소비하므로 미리 계산.
+    let packwiz_src_dir = config.pack_bundle_url.as_ref().map(|_| {
+        prism_paths
+            .instance_dir(&instance_id)
+            .join(".minecraft")
+            .join(".packwiz-src")
+    });
+
     let instance_id_for_sync = instance_id.clone();
     let config_for_sync = config.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -345,9 +355,77 @@ async fn invoke_third_party(
     .map_err(|e| format!("blocking task panic: {e}"))?
     .map_err(|e| e.to_string())?;
 
+    // 인증 팩 번들 다운로드 + 추출 (upsert 후, spawn 전). overrides(제작자 저작물)는
+    // 인증 채널로만 배포 → 런처가 EVENTS_TOKEN 으로 1회 GET → `.minecraft/.packwiz-src/`.
+    // 그 후 packwiz-installer(instance.cfg PreLaunchCommand)가 로컬 pack.toml 로 실행:
+    // override 검증 + mod jar 만 CF 공개 CDN fetch. 토큰은 여기서만 쓰이고 Prism/로그에 안 남음.
+    if let (Some(bundle_url), Some(src_dir)) = (config.pack_bundle_url.clone(), packwiz_src_dir) {
+        tauri::async_runtime::spawn_blocking(move || {
+            download_and_extract_bundle(&bundle_url, bearer_token.as_deref(), &src_dir)
+        })
+        .await
+        .map_err(|e| format!("blocking task panic: {e}"))??;
+    }
+
     super::prism::spawn_prism_instance(app, &instance_id)?;
 
     Ok(ActionOutcome::Launched { instance_id })
+}
+
+/// 인증 팩 번들(zip) 다운로드 + `dest_dir` 에 추출 (blocking).
+///
+/// overrides(제작자 저작물)는 공개 재배포 금지 → 오라클이 EVENTS_TOKEN(gateway forward_auth)
+/// 뒤에서 서빙. 런처만 토큰을 실어 1회 GET. mod jar 는 CF 공개 CDN 이라 번들에 없고,
+/// packwiz-installer 가 로컬 pack.toml 로 실행할 때 무인증 fetch 한다.
+/// `dest_dir` 는 매번 비우고 다시 추출 → 팩 갱신(파일 삭제 포함)이 정확히 반영.
+fn download_and_extract_bundle(
+    bundle_url: &str,
+    bearer: Option<&str>,
+    dest_dir: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::Read;
+
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(300)))
+        .build()
+        .new_agent();
+
+    let mut req = agent.get(bundle_url);
+    if let Some(token) = bearer {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let mut response = req
+        .call()
+        .map_err(|e| format!("팩 번들 다운로드 실패: {e}"))?;
+    let status = response.status();
+    if status == 401 {
+        return Err("팩 번들 인증 실패 (401) — 초대 링크로 재등록이 필요할 수 있습니다".into());
+    }
+    if !status.is_success() {
+        return Err(format!("팩 번들 다운로드 실패: HTTP {}", status.as_u16()));
+    }
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("팩 번들 응답 읽기 실패: {e}"))?;
+
+    // 갱신 정합: 이전 추출을 지우고 새로 추출.
+    if dest_dir.exists() {
+        std::fs::remove_dir_all(dest_dir)
+            .map_err(|e| format!("이전 팩 소스 제거 실패: {e}"))?;
+    }
+    std::fs::create_dir_all(dest_dir).map_err(|e| format!("팩 소스 폴더 생성 실패: {e}"))?;
+
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("팩 번들 zip 열기 실패: {e}"))?;
+    // zip crate 의 extract 는 enclosed_name 으로 zip-slip(경로 이탈) 방어. 소스도 인증됨.
+    archive
+        .extract(dest_dir)
+        .map_err(|e| format!("팩 번들 추출 실패: {e}"))?;
+    Ok(())
 }
 
 /// Submit form with user-filled data (fields 가 있는 경우).
