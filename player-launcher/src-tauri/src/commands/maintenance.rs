@@ -296,7 +296,8 @@ fn schedule_self_removal_windows() -> Result<(), String> {
 
     let script_path =
         std::env::temp_dir().join(format!("pengport-cleanup-{}.bat", std::process::id()));
-    std::fs::write(&script_path, script).map_err(|e| format!("정리 스크립트 생성 실패: {e}"))?;
+    super::write_windows_batch_script(&script_path, &script)
+        .map_err(|e| format!("정리 스크립트 생성 실패: {e}"))?;
 
     std::process::Command::new("cmd")
         .args(["/c", &script_path.to_string_lossy()])

@@ -408,11 +408,25 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
     }
   };
 
+  // 압축 하나 = 옵션 하나(2026-08 재설계, ArchiveOptionalField 참고) — 압축을
+  // "선택 항목"에서 체크 해제할 땐 그 압축이 소유한 optional_group도 같이 지워지는데,
+  // 압축 자체를 통째로 제거할 땐 그 정리를 거치지 않아 주인 없는 optional_group이
+  // "설치할 구성 요소" 목록에 유령으로 계속 남아있던 버그. 다른 압축/파일이 여전히
+  // 같은 그룹을 참조 중이면(정상 설계상 없어야 하지만 방어적으로) 지우지 않는다.
   const handleRemoveArchive = (index: number) => {
-    setDraft((prev) => ({
-      ...prev,
-      archives: renumberArchiveOrders(prev.archives.filter((_, i) => i !== index)),
-    }));
+    const removedGroup = draft.archives[index]?.optional_group ?? null;
+    setDraft((prev) => {
+      const archives = renumberArchiveOrders(prev.archives.filter((_, i) => i !== index));
+      const stillReferenced =
+        removedGroup !== null &&
+        (archives.some((a) => a.optional_group === removedGroup) ||
+          prev.files.some((f) => f.optional_group === removedGroup));
+      const optional_groups =
+        removedGroup !== null && !stillReferenced
+          ? prev.optional_groups.filter((g) => g.id !== removedGroup)
+          : prev.optional_groups;
+      return { ...prev, archives, optional_groups };
+    });
     setSelectedArchiveIndex((cur) => {
       if (cur === null || cur === index) return null;
       return cur > index ? cur - 1 : cur;

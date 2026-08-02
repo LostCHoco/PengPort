@@ -115,7 +115,8 @@ fn replace_running_exe_windows(new_exe_bytes: &[u8]) -> Result<(), String> {
     );
     let script_path =
         std::env::temp_dir().join(format!("pengport-relaunch-{}.bat", std::process::id()));
-    std::fs::write(&script_path, script).map_err(|e| format!("재시작 스크립트 생성 실패: {e}"))?;
+    super::write_windows_batch_script(&script_path, &script)
+        .map_err(|e| format!("재시작 스크립트 생성 실패: {e}"))?;
     std::process::Command::new("cmd")
         .args(["/c", &script_path.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
