@@ -334,18 +334,18 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
     const isUnderPath = (p: string) => p === path || p.startsWith(prefix);
     const selectedPath =
       selectedFileIndex !== null ? (draft.files[selectedFileIndex]?.path ?? null) : null;
-    let newFiles: RecipeFile[] = [];
-    setDraft((prev) => {
-      newFiles = prev.files.filter((f) => !isUnderPath(f.path));
-      const hasRule = prev.folder_rules.some((r) => r.path === path);
-      return {
-        ...prev,
-        files: newFiles,
-        folder_rules: hasRule
-          ? prev.folder_rules
-          : [...prev.folder_rules, { path, mode: { kind: "passthrough" } }],
-      };
-    });
+    // `newFiles`는 이 핸들러 안에서 딱 한 번만 draft를 건드리므로(다른 setDraft와
+    // 같은 이벤트에서 안 겹침) `draft`에서 직접 계산해도 안전 — setState 업데이터가
+    // 언제 실제로 실행되는지(React가 보장 안 함)에 기대지 않는다.
+    const newFiles = draft.files.filter((f) => !isUnderPath(f.path));
+    const hasRule = draft.folder_rules.some((r) => r.path === path);
+    setDraft((prev) => ({
+      ...prev,
+      files: prev.files.filter((f) => !isUnderPath(f.path)),
+      folder_rules: hasRule
+        ? prev.folder_rules
+        : [...prev.folder_rules, { path, mode: { kind: "passthrough" } }],
+    }));
     if (selectedPath !== null && !isUnderPath(selectedPath)) {
       const newIndex = newFiles.findIndex((f) => f.path === selectedPath);
       setSelectedFileIndex(newIndex >= 0 ? newIndex : null);
@@ -363,15 +363,12 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
     const isUnderRemoved = (p: string) => p === path || p.startsWith(prefix);
     const selectedPath =
       selectedFileIndex !== null ? (draft.files[selectedFileIndex]?.path ?? null) : null;
-    let newFiles: RecipeFile[] = [];
-    setDraft((prev) => {
-      newFiles = prev.files.filter((f) => !isUnderRemoved(f.path));
-      return {
-        ...prev,
-        files: newFiles,
-        folder_rules: prev.folder_rules.filter((r) => !isUnderRemoved(r.path)),
-      };
-    });
+    const newFiles = draft.files.filter((f) => !isUnderRemoved(f.path));
+    setDraft((prev) => ({
+      ...prev,
+      files: prev.files.filter((f) => !isUnderRemoved(f.path)),
+      folder_rules: prev.folder_rules.filter((r) => !isUnderRemoved(r.path)),
+    }));
     if (selectedPath !== null && !isUnderRemoved(selectedPath)) {
       const newIndex = newFiles.findIndex((f) => f.path === selectedPath);
       setSelectedFileIndex(newIndex >= 0 ? newIndex : null);
@@ -393,17 +390,17 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
       if (!picked || typeof picked !== "string") return;
       setAddingArchive(true);
       const hash = await computeFileSha256(picked);
-      let newLength = 0;
-      setDraft((prev) => {
-        const archive: ArchiveExtraction = {
-          ...defaultArchive(prev.archives),
-          verification: { kind: "sha256", hash },
-        };
-        const archives = renumberArchiveOrders([...prev.archives, archive]);
-        newLength = archives.length;
-        return { ...prev, archives };
-      });
-      setSelectedArchiveIndex(newLength - 1);
+      // 새 압축은 항상 배열 끝에 추가되므로, 지금(await 이후) 시점의 `draft.archives.length`가
+      // 곧 그 새 압축의 인덱스다 — 파일 선택 다이얼로그가 모달이라 그 사이 다른 압축
+      // 추가/삭제가 끼어들 수 없음을 전제로 한다(setState 업데이터 내부 값을 밖에서
+      // 동기적으로 읽으려 했던 이전 버전의 버그 패턴을 피함).
+      const archive: ArchiveExtraction = {
+        ...defaultArchive(draft.archives),
+        verification: { kind: "sha256", hash },
+      };
+      const newIndex = draft.archives.length;
+      setDraft((prev) => ({ ...prev, archives: renumberArchiveOrders([...prev.archives, archive]) }));
+      setSelectedArchiveIndex(newIndex);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -437,14 +434,16 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
   const handleCreateOptionalGroup = (label: string): string => {
     const trimmed = label.trim();
     if (!trimmed) return "";
-    let id = "";
-    setDraft((prev) => {
-      id = uniqueId(slugify(trimmed), prev.optional_groups.map((g) => g.id));
-      return {
-        ...prev,
-        optional_groups: [...prev.optional_groups, { id, label: trimmed, default_selected: false }],
-      };
-    });
+    // `draft`에서 직접 계산 — 이 핸들러 안에서 draft를 건드리는 setState 호출은
+    // 이거 하나뿐이라 안전하다(React가 setState 업데이터를 언제 실제로 실행하는지는
+    // 보장하지 않으므로, 그 안에서 바깥 변수에 값을 대입하고 곧바로 읽어오는 패턴에
+    // 기대면 안 됨 — 이전에 이 함수가 그 패턴으로 인해 반환값이 항상 빈 문자열이 돼
+    // "선택 항목" 체크박스가 안 먹는 버그가 났었음).
+    const id = uniqueId(slugify(trimmed), draft.optional_groups.map((g) => g.id));
+    setDraft((prev) => ({
+      ...prev,
+      optional_groups: [...prev.optional_groups, { id, label: trimmed, default_selected: false }],
+    }));
     return id;
   };
 
