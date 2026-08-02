@@ -4,6 +4,15 @@ use tauri::{Emitter, Manager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 자체 업데이트 직후 재시작된 프로세스 — 옛 프로세스(같은 exe, 다른 pid)가
+    // `tauri_plugin_single_instance` 잠금을 놓을 때까지 기다린 뒤에야 정상 초기화를
+    // 계속한다(안 그러면 이 새 프로세스가 "이미 실행 중"으로 오인돼 옛 프로세스로
+    // focus 만 넘기고 조용히 종료해버림). `commands::self_update` 모듈 설명 참고.
+    let startup_args: Vec<String> = std::env::args().collect();
+    if let Some(old_pid) = commands::self_update::parse_wait_for_exit_pid(&startup_args) {
+        commands::self_update::wait_for_process_exit(old_pid, std::time::Duration::from_secs(10));
+    }
+
     // 0.1.3 부터 사용자 데이터 폴더가 `app.pengport` → `PengPort` 로 변경됨.
     // Tauri webview 가 user data dir 에 lock 잡기 전에 옛 폴더를 새 이름으로 rename.
     commands::paths::migrate_legacy_app_dirs();

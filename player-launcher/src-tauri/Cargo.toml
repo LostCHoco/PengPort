@@ -68,6 +68,12 @@ tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }
+# 자체 업데이트 exe 교체(`commands::self_update`) — rustup 등이 쓰는 검증된 기법
+# (임시 파일을 FILE_FLAG_DELETE_ON_CLOSE로 열어 자기 복사본을 spawn, 옛 exe 삭제를
+# OS에 위임)을 그대로 재사용. cmd.exe/PowerShell/배치 스크립트에 경로를 문자열로
+# 실어 보내는 지점이 아예 없어서, 우리가 직접 짠 버전이 한글 등 비ASCII 경로에서
+# 깨졌던 문제(2026-08) 자체가 구조적으로 발생할 수 없다.
+self-replace = "1"
 # minecraft 클라이언트의 visible window 가 떴는지 검출 (EnumWindows + GetWindowThreadProcessId).
 # java process spawn ≠ 게임 창 등장 — 그 사이 LWJGL 초기화 + world load 가 있음.
 windows-sys = { version = "0.59", features = [
