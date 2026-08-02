@@ -4,8 +4,7 @@ build_client.py — PengPort 배포 번들 빌드.
 
 산출물:
 1) Portable zip   (`client/build/PengPort-{version}.zip`)
-     PengPort.exe                # Tauri release 바이너리
-     README.txt                      # 간단 안내
+     PengPort.exe                # Tauri release 바이너리 — 원클릭 컨셉상 안내문 없음
 2) Release assets (`client/build/release-{version}/`)
      PengPort_{X.Y.Z}_x64-setup.exe     # NSIS installer (자동 업데이트용)
      PengPort_{X.Y.Z}_x64-setup.exe.sig # minisign 서명
@@ -192,18 +191,15 @@ def run_env(cmd: list[str], cwd: Path | None = None, env: dict | None = None) ->
     subprocess.run(cmd, cwd=cwd or ROOT, check=True, env=env)
 
 
-def stage_bundle(staging: Path, exe: Path, readme: str) -> None:
-    """staging 폴더에 최종 배포 구조를 구성. (PengPort.exe + README 만)
-    PrismLauncher 는 런타임에 시스템에서 탐색하거나 OOBE 로 다운로드함."""
+def stage_bundle(staging: Path, exe: Path) -> None:
+    """staging 폴더에 최종 배포 구조를 구성 — PengPort.exe 하나뿐(원클릭 컨셉상
+    별도 안내문 없이도 실행만 하면 되게, 2026-08 사용자 확인)."""
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
 
     # Tauri exe → 사용자에게 보이는 이름으로 복사
     shutil.copy2(exe, staging / "PengPort.exe")
-
-    # README
-    (staging / "README.txt").write_text(readme, encoding="utf-8")
 
 
 def zip_staging(staging: Path, out: Path) -> Path:
@@ -241,19 +237,6 @@ def zip_staging(staging: Path, out: Path) -> Path:
     return out
 
 
-README_TEMPLATE = """PengPort
-
-1. "PengPort.exe" 를 실행합니다.
-2. 처음 실행 시 PrismLauncher 를 자동으로 찾습니다.
-   - PrismLauncher 가 없다면 https://prismlauncher.org 에서 설치 후 다시 실행하세요.
-   - (추후 업데이트로 자동 다운로드 기능이 추가될 예정입니다.)
-3. 서버 목록에서 Play 버튼을 누르면 자동으로 인스턴스를 준비합니다.
-4. 이후 최신 모드/설정은 실행할 때마다 자동 동기화됩니다.
-
-업데이트는 자동으로 확인되며, 새 버전이 있으면 [설정] 에서 설치할 수 있습니다.
-"""
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", default="v3", help="Portable zip 라벨 (배포 세대 구분용)")
@@ -281,8 +264,8 @@ def main() -> int:
         print(f"[FAIL] 빌드 산출물 없음: {exe}", file=sys.stderr)
         return 1
 
-    # 1) Portable zip (PengPort.exe + README, 최초 배포용)
-    stage_bundle(staging, exe, README_TEMPLATE)
+    # 1) Portable zip (PengPort.exe 하나, 최초 배포용)
+    stage_bundle(staging, exe)
     zip_path = zip_staging(staging, zip_path)  # 잠금 시 timestamp 이름으로 fallback 가능
     size_mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"\n[OK] portable zip: {zip_path} ({size_mb:.1f} MB)")

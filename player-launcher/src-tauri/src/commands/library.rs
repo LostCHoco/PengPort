@@ -489,19 +489,29 @@ pub async fn library_delete_installed_data(
 
     match groups {
         None => {
-            let target_root = resolve_target_root(&recipe.id, &recipe.launch)?;
+            // ThirdPartyAppLaunch(예: Prism 기반 Minecraft 인스턴스)는 third-party
+            // app 자체를 찾아야 그 인스턴스 폴더 위치도 알 수 있다 — Prism이 삭제됐거나
+            // 옮겨져 못 찾으면 어디를 지워야 할지 PengPort가 알 방법이 없다. 이걸 못
+            // 찾는다고 삭제 전체(마커 정리까지)를 막으면 "라이브러리에서 제거"가 영영
+            // 안 되는 궁지에 빠진다 — "로컬 경로 오버라이드"와 같은 성격(PengPort가
+            // 손댈 수 없는 대상)이라 조용히 skip 하고, PengPort 자신이 아는 마커
+            // 폴더(third-party app 위치와 무관)는 그대로 정리한다.
+            let target_root = resolve_target_root(&recipe.id, &recipe.launch).ok();
             let markers_root = super::paths::app_root(&recipe.id)
                 .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?;
 
             tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-                if target_root.exists() {
-                    std::fs::remove_dir_all(&target_root)
-                        .map_err(|e| format!("설치 데이터 삭제 실패 ({}): {e}", target_root.display()))?;
+                if let Some(target_root) = &target_root {
+                    if target_root.exists() {
+                        std::fs::remove_dir_all(target_root)
+                            .map_err(|e| format!("설치 데이터 삭제 실패 ({}): {e}", target_root.display()))?;
+                    }
                 }
                 // SpawnProcess 는 target_root == markers_root(같은 apps/<id>/) 라 위에서 이미 지워짐.
                 // ThirdPartyAppLaunch 는 markers_root 가 별도 위치(apps/<id>/.pengport-markers 만
-                // 들어있는 작은 폴더)라 따로 지워야 함.
-                if markers_root != target_root && markers_root.exists() {
+                // 들어있는 작은 폴더)라 따로 지워야 함. target_root 를 못 찾은 경우(위 주석)에도
+                // 이 마커 폴더는 PengPort 자신의 위치라 항상 정리 가능.
+                if target_root.as_deref() != Some(markers_root.as_path()) && markers_root.exists() {
                     std::fs::remove_dir_all(&markers_root)
                         .map_err(|e| format!("설치 마커 삭제 실패 ({}): {e}", markers_root.display()))?;
                 }
@@ -1845,8 +1855,22 @@ fn execute_archive(
         // `reconcile_install`의 별도(명시적) 경로가 담당(위 doc comment 참고). 반환하는
         // 상대경로 목록은 호출자가 매니페스트로 기록해서, 나중에 이 그룹만 정밀 삭제할
         // 때 다른 압축이 같은 폴더에 넣어둔 콘텐츠를 안 건드리게 한다.
+        //
+        // strip_root(최상위 컴포넌트 하나 벗기기)는 "압축 내부가 통째로 자기 소유
+        // 폴더 하나로 감싸져 있다"(예: ESong.7z 안이 전부 `ESong/...`) 는 전제에서만
+        // 옳다 — `path_overrides`를 선언한 압축은 그 전제 자체가 다르다(파일들이
+        // 압축 최상위에 개별로 있고, 각 파일을 어디로 보낼지 직접 지정하는 방식이라
+        // 감싸는 폴더가 없음). 이 경우 strip_root=true 를 그대로 쓰면 최상위 파일
+        // 엔트리(경로 부품이 하나뿐)가 "감싸는 폴더 이름 자체를 가리키는 엔트리"로
+        // 오인돼 `safe_join_archive_entry`가 통째로 건너뛰어버린다 — 실제로 이 버그로
+        // DPJAM 레시피의 개별 파일 교체용 그룹 압축들이 압축을 열어도 아무 것도
+        // 추출하지 못하고 있었다(2026-08 확인). `path_overrides`가 있으면 배치를
+        // 전적으로 그게 담당하므로 strip_root 없이 원래 경로 그대로 추출한다.
+        let strip_root = archive.path_overrides.is_empty();
         let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, format_hint: &format_hint };
-        return extract_archive_file(&tmp_path, &archive.url, &dest_dir, true, raw_filename, ctx, Some(cancel_flag));
+        let written =
+            extract_archive_file(&tmp_path, &archive.url, &dest_dir, strip_root, raw_filename, ctx, Some(cancel_flag))?;
+        return apply_path_overrides(&written, &dest_dir, &root, &archive.path_overrides);
     }
 
     let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, format_hint: &format_hint };
