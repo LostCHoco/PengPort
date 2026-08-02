@@ -2,21 +2,19 @@
 //!
 //! ## 모듈 구성
 //!
-//! - **`psp`** — PSP v1 schema (manifest, status, events, catalog, instance metadata, fetch)
-//! - **`actions`** — PSP action 검증 + dispatch (open_url / open_protocol / submit_form / native_third_party_app)
-//! - **`trust`** — TOFU 신뢰 저장소 (3-tier 신뢰 모델 영속화)
-//! - **`prism`** — PSP `third_party.prism-launcher` entry 의 인스턴스 sync (Prism 측 instance.cfg / mmc-pack.json 렌더 + servers.dat 등록)
-//! - **`servers_dat`** — Minecraft `.minecraft/servers.dat` (NBT) 자동 등록
-//!
-//! 옛 servers.toml 흐름 (`servers`, `cdn`, `status`) 은 PSP 단방향 마이그레이션과 함께 제거됨.
+//! - **`library`** — 0.2.0 앱 라이브러리 핵심(v7 스키마): [`library::Recipe`] + 아티팩트
+//!   검증([`library::verify`]) + 로컬 저장소([`library::LibraryStore`]) + 링크 임포트/
+//!   내보내기([`library::bundle`], [`library::import`]).
+//! - **`actions`** — `Recipe.archives`/`Recipe.files`/`Recipe.launch` 검증
+//!   ([`actions::validate_recipe`]) + third-party app 탐지([`actions::third_party_app`]).
+//! - **`servers_dat`** — Minecraft `.minecraft/servers.dat` (NBT). 런타임 병합 경로는
+//!   v5 재설계로 불필요해졌으나(third-party app 데이터는 정적 콘텐츠로 레시피가 직접
+//!   들고 있음), 레시피 작성 시점 도구로 재활용할지는 열린 질문 — 결정 전까지 존치.
 
 pub mod actions;
 pub mod ids;
-pub mod prism;
-pub mod psp;
+pub mod library;
 pub mod servers_dat;
-pub mod trust;
 
 pub use ids::{is_valid_service_id, validate_service_id, IdError};
-pub use prism::{upsert_prism_instance, InstanceOutcome, PrismError, PrismPaths};
 pub use servers_dat::{upsert_server as upsert_servers_dat, ServersDat, ServersDatError};

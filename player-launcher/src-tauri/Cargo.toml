@@ -26,21 +26,21 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
-# 운영자가 친구에게 보낸 `pengport://join?url=...&token=...` 링크를 클릭하면 PengPort 가
-# 받아 인스턴스 등록 dialog 를 띄움. NSIS installer 가 scheme 을 OS 에 자동 등록 안 해서,
-# setup() 에서 app.deep_link().register_all() 을 런타임 호출해야 dev/prod 모두 작동.
-tauri-plugin-deep-link = "2"
-# 운영자가 Settings → 인스턴스 → [초대 링크 복사] 클릭 시 `pengport://join?...` 를 클립보드에
-# 쓸 때 사용. webview 의 navigator.clipboard 는 Tauri 2 에서 보안상 차단되는 경우가 있어
-# native plugin 이 안전.
+# 라이브러리 화면의 "에러 복사" 버튼에 사용. webview 의 navigator.clipboard 는 Tauri 2 에서
+# 보안상 차단되는 경우가 있어 native plugin 이 안전.
 tauri-plugin-clipboard-manager = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 ureq = { workspace = true }
 zip = { workspace = true }
+sevenz-rust2 = { workspace = true }
+# InstallStep::WriteFile/ThirdPartyAppSetup 의 FileContent::Base64 디코딩.
+base64 = { workspace = true }
+# 설치/업데이트 idempotent 마커 — 스텝 내용 해시로 "이 스텝이 이미(그리고 지금과
+# 동일하게) 적용됐는지" 판단(설치 vs 업데이트를 가르는 핵심).
+sha2 = { workspace = true }
 # OS native secret store (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 # instance_token / updater_token 등 user session 보호 단위로 격리. master password 불필요.
 #
@@ -56,12 +56,15 @@ pengport-shared = { path = "../../shared" }
 sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 # Tauri 내부적으로 tokio 사용하지만 re-export 안 함. polling 의 sleep + async runtime 호환용.
 tokio = { version = "1", features = ["time"] }
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+# FolderRule 패턴(글롭) 매칭 — pruning 엔진에서 사용.
+glob = "0.3"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-# 두 번째 launch (deep link 클릭 등) 가 별도 process 로 뜨지 않고 첫 번째 인스턴스로 args
-# forward 되도록. deep_link plugin v2 가 desktop 에서 single_instance 와 함께 쓰는 걸 권장 —
-# OS 가 새 process 를 spawn 하면서 URL 을 argv 로 넘기므로 첫 인스턴스가 그걸 emit 으로 받아야.
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# 두 번째 launch(`.pengz` 파일 더블클릭 등) 가 별도 process 로 뜨지 않고 첫 번째
+# 인스턴스로 args forward 되도록.
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = { workspace = true }

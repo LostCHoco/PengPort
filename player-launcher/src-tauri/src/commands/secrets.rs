@@ -3,8 +3,12 @@
 //! Windows Credential Manager / macOS Keychain / Linux Secret Service 사용.
 //! user session 단위로 보호되며 master password 불필요.
 //!
-//! 저장하는 시크릿 (account 이름):
-//! - `instance_token:<id>`: PSP instance 의 catalog/SSE bearer 토큰 (instance 별 격리)
+//! **0.2.0부터 미사용(dormant)** — `instance_token:<id>`는 인스턴스 개념이 있던
+//! 옛 모델의 bearer 토큰이었는데, 인스턴스가 없어지며 호출부(`lib.rs`의
+//! invoke_handler 등록)가 제거됨. 코드는 남겨둠 — 레시피별 시크릿이 필요해지면
+//! 이 wrapper를 그대로 재사용 가능. 재사용 안 하기로 결정되면 파일째 삭제할 것.
+
+#![allow(dead_code)]
 
 use keyring::Entry;
 

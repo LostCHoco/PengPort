@@ -1,12 +1,13 @@
 // 첫 실행 시 사용 모드 선택 dialog.
 //
-// 일반 사용자: [내 PC] — 평소 모드. instance / token 영구 저장. 다음 launch 부터 선택 안 받음.
+// 사용자: [내 PC] — 일반 모드. 라이브러리 / third-party 앱 계정 영구 저장. 다음 launch 부터 선택 안 받음.
 // 공용 PC 사용자 (PC방 등): [공용 PC] — 1회용 모드. 종료 시 모든 데이터 + PengPort 자체 자동 정리.
 //
 // dialog 자체는 modal — 모드 선택 전 PengPort 사용 차단. backdrop / ESC 로 닫기 X (모드 미선택 상태가
-// 잘못된 default — 평소 모드든 1회용 모드든 명시 선택 강제).
+// 잘못된 default — 일반 모드든 1회용 모드든 명시 선택 강제).
 
 import { useRef } from "react";
+import { Portal } from "@/components/ui/portal";
 import type { Mode } from "@/lib/mode";
 
 interface Props {
@@ -18,6 +19,7 @@ export function ModeSelectorDialog({ onSelect }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
 
   return (
+    <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
       role="dialog"
@@ -41,15 +43,15 @@ export function ModeSelectorDialog({ onSelect }: Props) {
 
         <div className="mt-5 grid grid-cols-1 gap-3">
           <ModeOption
-            title="내 PC (평소 사용)"
-            desc="인스턴스 / 토큰 / 게임 설정을 영구 저장합니다. 평소 자기 PC 에서 사용하는 일반 모드."
-            cta="이 PC 에서 평소 사용"
+            title="내 PC (일반 사용)"
+            desc="라이브러리 / third-party 앱 계정 / 실행 데이터를 영구 저장하는 일반 모드입니다."
+            cta="이 PC 에서 일반 사용"
             onClick={() => onSelect("normal")}
             primary
           />
           <ModeOption
             title="공용 PC (1회용 모드)"
-            desc="PC방 / 친구 PC 등 일시 사용. PengPort 종료 시 모든 데이터 (인스턴스 / 토큰 / Prism 계정 / Minecraft 세이브) 와 PengPort 자체가 자동 정리됩니다. 흔적 0."
+            desc="PC방 / 친구 PC 등 일시 사용. PengPort 종료 시 모든 데이터 (라이브러리 / third-party 앱 계정 / 실행 데이터) 와 PengPort 자체가 자동 정리됩니다. 흔적 0."
             cta="1회용 모드로 시작"
             onClick={() => onSelect("ephemeral")}
             warn
@@ -61,6 +63,7 @@ export function ModeSelectorDialog({ onSelect }: Props) {
         </p>
       </div>
     </div>
+    </Portal>
   );
 }
 

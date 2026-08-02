@@ -1,11 +1,11 @@
 //! Minecraft `servers.dat` (NBT) 자동 등록.
 //!
-//! Prism 인스턴스의 `.minecraft/servers.dat` 에 펭돌서버 entry 를 upsert 한다.
-//! 사용자가 직접 추가한 다른 서버 entry 는 보존하고, 펭돌서버 entry (host:port 매칭)
-//! 만 갱신/추가한다.
+//! Prism 인스턴스의 `.minecraft/servers.dat` 에 레시피가 지정한 서버 entry 를 upsert 한다.
+//! 사용자가 직접 추가한 다른 서버 entry 는 보존하고, 그 entry (host:port 매칭)만
+//! 갱신/추가한다.
 //!
 //! 동작 보장:
-//! - 사용자가 펭돌서버를 일부러 지웠어도 다음 sync 때 다시 추가됨 (= 항상 등록 유지)
+//! - 사용자가 그 entry 를 일부러 지웠어도 다음 sync 때 다시 추가됨 (= 항상 등록 유지)
 //! - 사용자가 만든 다른 서버 entry 는 절대 건드리지 않음
 //! - 변경 사항이 없으면 파일을 다시 쓰지 않음 (mtime 보존)
 //!
@@ -136,17 +136,17 @@ mod tests {
         let tmp = tempdir_path("roundtrip");
         let dat = tmp.join("servers.dat");
 
-        let changed = upsert_server(&dat, "AlphaPeng", "pengdoll.duckdns.org", 25566).unwrap();
+        let changed = upsert_server(&dat, "MyServer", "my-server.example.com", 25565).unwrap();
         assert!(changed);
 
         let bytes = fs::read(&dat).unwrap();
         let parsed: ServersDat = fastnbt::from_bytes(&bytes).unwrap();
         assert_eq!(parsed.servers.len(), 1);
-        assert_eq!(parsed.servers[0].name, "AlphaPeng");
-        assert_eq!(parsed.servers[0].ip, "pengdoll.duckdns.org:25566");
+        assert_eq!(parsed.servers[0].name, "MyServer");
+        assert_eq!(parsed.servers[0].ip, "my-server.example.com:25565");
 
         // 같은 상태로 다시 호출 → 변경 없음
-        let changed = upsert_server(&dat, "AlphaPeng", "pengdoll.duckdns.org", 25566).unwrap();
+        let changed = upsert_server(&dat, "MyServer", "my-server.example.com", 25565).unwrap();
         assert!(!changed);
     }
 
@@ -167,7 +167,7 @@ mod tests {
                 },
                 ServerEntry {
                     name: "Modded Survival".into(), // 옛날 이름
-                    ip: "pengdoll.duckdns.org:25566".into(),
+                    ip: "my-server.example.com:25565".into(),
                     icon: None,
                     accept_textures: None,
                     hidden: None,
@@ -178,8 +178,8 @@ mod tests {
         f.write_all(&fastnbt::to_bytes(&initial).unwrap()).unwrap();
         drop(f);
 
-        // 새 이름 (AlphaPeng) 으로 upsert → 기존 entry 의 name 만 갱신
-        let changed = upsert_server(&dat, "AlphaPeng", "pengdoll.duckdns.org", 25566).unwrap();
+        // 새 이름 (MyServer) 으로 upsert → 기존 entry 의 name 만 갱신
+        let changed = upsert_server(&dat, "MyServer", "my-server.example.com", 25565).unwrap();
         assert!(changed);
 
         let parsed: ServersDat = fastnbt::from_bytes(&fs::read(&dat).unwrap()).unwrap();
@@ -188,9 +188,9 @@ mod tests {
         let mine = parsed
             .servers
             .iter()
-            .find(|s| s.ip == "pengdoll.duckdns.org:25566")
+            .find(|s| s.ip == "my-server.example.com:25565")
             .unwrap();
-        assert_eq!(mine.name, "AlphaPeng");
+        assert_eq!(mine.name, "MyServer");
         // 친구 서버 보존
         assert!(parsed.servers.iter().any(|s| s.name == "친구 서버"));
     }

@@ -1,47 +1,46 @@
-//! 데이터 정리/삭제/언인스톨 — 사용자가 명시적으로 호출하는 위험 작업.
+//! 데이터 정리/삭제 — 사용자가 명시적으로 호출하는 위험 작업.
 //!
 //! 세 가지 명령:
-//! - `wipe_all_data`        — PengPort 가 만든 모든 state 초기화 (프로그램 자체는 유지)
-//! - `remove_prism_instance` — Prism 의 인스턴스 폴더 1개 삭제
-//! - `uninstall_self`       — Windows NSIS uninstaller 호출 후 자체 종료
+//! - `wipe_all_data`                  — PengPort 가 만든 모든 state 초기화 (프로그램 자체는 유지)
+//! - `remove_third_party_app_instance` — third-party app(예: Prism) 의 인스턴스 폴더 1개 삭제
+//! - `uninstall_self`                 — exe + data 폴더 자체 삭제 후 종료. Portable 모델이라
+//!   인스톨러가 없다 — 설정 화면의 수동 UI는 없고, kiosk(ephemeral) 모드 종료 자동
+//!   cleanup 흐름 전용
 //!
 //! 호출 직전에 frontend 에서 confirm dialog 로 사용자 동의 필수. Rust 측은 검증 없음.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tauri::AppHandle;
 
-use super::{paths, prism};
+use super::{library, paths};
 
 // ---------------------------------------------------------------------------
-// remove_prism_instance — Prism 의 instances/<id>/ 폴더 1개 삭제
+// remove_third_party_app_instance — third-party app 의 instances/<id>/ 폴더 1개 삭제
 // ---------------------------------------------------------------------------
 
-/// PengPort 가 spawn 한 Prism 인스턴스의 폴더를 통째로 삭제한다.
+/// PengPort 가 spawn 한 third-party app 인스턴스의 폴더를 통째로 삭제한다.
 ///
-/// `instance_id` 는 PSP service id (= Prism instance dir name). 이 폴더 안에는 Minecraft
-/// 의 saves/ 등 사용자 데이터도 있으므로 호출자가 frontend 에서 명시적 confirm 후 호출할 것.
+/// `instance_id` 는 레시피 id(= 인스턴스 dir name). 이 폴더 안에는 세이브 등 사용자
+/// 데이터도 있으므로 호출자가 frontend 에서 명시적 confirm 후 호출할 것.
 ///
-/// 보안: instance_id 는 외부 (catalog) controlled 이므로 validate_service_id 통과 강제.
-/// 미통과 시 즉시 거부 — path traversal 로 임의 폴더 삭제 차단.
+/// 보안: `app_id`/`instance_id` 둘 다 외부(링크 임포트) controlled 이므로
+/// `third_party_app_instance_dir`(내부적으로 `validate_service_id` 강제 — third_party_app.rs
+/// 참고)를 통해서만 경로를 만든다 — path traversal 로 임의 폴더 삭제 차단.
 ///
-/// Prism 본체나 다른 instance 폴더는 건드리지 않음. Bundled vs system Prism 구분 없이
-/// 현재 active prism_paths 의 instances/ 아래에서 동작.
+/// 해당 third-party app 본체나 다른 instance 폴더는 건드리지 않음. Bundled vs system
+/// 구분 없이 현재 활성 위치의 instances/ 아래에서 동작.
 #[tauri::command]
-pub async fn remove_prism_instance(instance_id: String) -> Result<(), String> {
-    pengport_shared::validate_service_id(&instance_id)
-        .map_err(|e| format!("instance_id 형식 오류 ({instance_id:?}): {e}"))?;
-
-    let (_, prism_paths) = prism::prism_paths()?;
-    let dir = prism_paths.instance_dir(&instance_id);
+pub async fn remove_third_party_app_instance(app_id: String, instance_id: String) -> Result<(), String> {
+    let dir = library::third_party_app_instance_dir(&app_id, &instance_id)?;
     if !dir.exists() {
         return Ok(());
     }
     tauri::async_runtime::spawn_blocking(move || {
         std::fs::remove_dir_all(&dir).map_err(|e| {
             format!(
-                "Prism 인스턴스 폴더 삭제 실패 ({}): {e}",
+                "{app_id} 인스턴스 폴더 삭제 실패 ({}): {e}",
                 dir.display()
             )
         })
@@ -54,15 +53,26 @@ pub async fn remove_prism_instance(instance_id: String) -> Result<(), String> {
 // wipe_all_data — PengPort 가 만든 state 전부 초기화 (앱 자체는 유지)
 // ---------------------------------------------------------------------------
 
-/// `wipe_all_data` 의 입력 — frontend 가 가진 정보 (instance ids, prism instance ids).
-/// keyring 은 enumerate API 가 없어 frontend 가 instance id 목록을 넘겨줘야 한다.
+/// `third_party_app_instances` 항목 하나 — 특정 third-party app(`app_id`)의 인스턴스
+/// 폴더들(`instance_ids`) 을 삭제할 대상.
+#[derive(Debug, serde::Deserialize)]
+pub struct ThirdPartyAppInstanceWipeTarget {
+    pub app_id: String,
+    pub instance_ids: Vec<String>,
+}
+
+/// `wipe_all_data` 의 입력 — frontend 가 가진 정보 (instance ids, third-party app 인스턴스
+/// ids). keyring 은 enumerate API 가 없어 frontend 가 instance id 목록을 넘겨줘야 한다.
 /// localStorage 도 frontend 가 따로 비워야 한다 (이 함수는 native state 만 담당).
 #[derive(Debug, serde::Deserialize)]
 pub struct WipeRequest {
     /// keyring 의 `instance_token:<id>` entry 들을 정리할 대상.
     pub instance_ids: Vec<String>,
-    /// Prism 의 instances/<id>/ 폴더들을 삭제할 대상 (PengPort 가 만든 것만).
-    pub prism_instance_ids: Vec<String>,
+    /// third-party app 별 instances/<id>/ 폴더들을 삭제할 대상(PengPort 가 만든 것만).
+    /// app_id 로 그룹화된 이유: 서로 다른 third-party app 이 각자의 데이터 루트 아래
+    /// 자기 instances/ 를 가지므로, 삭제 전에 app_id 별로 한 번씩만 위치를 해석하면 된다.
+    #[serde(default)]
+    pub third_party_app_instances: Vec<ThirdPartyAppInstanceWipeTarget>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -79,82 +89,131 @@ pub struct WipeReport {
 /// 대상:
 /// - keyring `app.pengport` service 의 `instance_token:*` entry 들
 /// - `%APPDATA%/app.pengport/trust.json`
-/// - `%APPDATA%/app.pengport/prism_settings.toml`
-/// - `%LOCALAPPDATA%/app.pengport/prism/` (bundled PrismLauncher)
-/// - `%LOCALAPPDATA%/app.pengport/packwiz-installer-bootstrap.jar`
-/// - 호출자가 지정한 Prism instance 폴더들 (PengPort 가 만든 것만)
+/// - `%APPDATA%/app.pengport/third_party_app_overrides.json` (Prism 등 override 경로)
+/// - `%LOCALAPPDATA%/app.pengport/<app_id>/` (bundled third-party app, 예: Prism)
+/// - 호출자가 지정한 third-party app 인스턴스 폴더들 (PengPort 가 만든 것만)
 ///
 /// 영향 범위 **밖**:
 /// - 앱 자체 (실행 파일 + tauri.conf 의 OS 표준 위치 잔재)
-/// - 시스템 Prism 의 다른 인스턴스 (PengPort 가 안 만든 것)
+/// - 시스템에 이미 설치된 third-party app 의 다른 인스턴스 (PengPort 가 안 만든 것)
 /// - localStorage / IndexedDB (frontend 가 별도 정리)
+/// - **이 프로세스(PengPort) 자신이 지금 쓰고 있는 webview 프로필**(`EBWebView`) — "초기화"는
+///   PengPort 를 종료하지 않는 흐름이라 그 폴더는 항상 잠겨 있어 못 지운다("PengPort
+///   삭제"는 실제로 종료한 뒤 지우므로 이 제약이 없다 — `uninstall_self` 참고).
 #[tauri::command]
 pub async fn wipe_all_data(req: WipeRequest) -> Result<WipeReport, String> {
-    let mut report = WipeReport::default();
+    tauri::async_runtime::spawn_blocking(move || -> Result<WipeReport, String> {
+        let mut report = WipeReport::default();
 
-    // 1) keyring 정리.
-    for id in &req.instance_ids {
-        let account = format!("instance_token:{id}");
-        match keyring_clear(&account) {
-            Ok(true) => report.keyring_cleared += 1,
-            Ok(false) => {} // 이미 없음
-            Err(e) => report
-                .failures
-                .push(format!("keyring '{account}': {e}")),
+        // 0) 추적 중인 실행 프로세스(프리즘/그 자식 마인크래프트 등) 강제 종료 — 실사용
+        //    중 발견된 버그: 이걸 안 하면 그 프로세스가 잠근 파일(예: prism_launcher\
+        //    accounts.json, 로드된 DLL) 때문에 아래 3)의 삭제가 실패해서 서드파티 앱
+        //    사본이 그대로 남았다.
+        super::third_party_runtime::kill_all_running_blocking();
+
+        // 1) keyring 정리.
+        for id in &req.instance_ids {
+            let account = format!("instance_token:{id}");
+            match keyring_clear(&account) {
+                Ok(true) => report.keyring_cleared += 1,
+                Ok(false) => {} // 이미 없음
+                Err(e) => report
+                    .failures
+                    .push(format!("keyring '{account}': {e}")),
+            }
         }
-    }
 
-    // 2) Prism 인스턴스 폴더들 (PengPort 가 만든 것).
-    //    Prism 자체가 시스템에 없으면 지울 인스턴스 폴더도 없으므로 silent skip — failures 에
-    //    추가하면 사용자에게 "실패" 로 보여 혼란.
-    //
-    //    보안: 각 id 는 path traversal 차단 위해 validate_service_id 통과 강제.
-    //    미통과 id 는 failures 에 기록하고 skip.
-    if !req.prism_instance_ids.is_empty() {
-        if let Ok((_, prism_paths)) = prism::prism_paths() {
-            for id in &req.prism_instance_ids {
+        // 2) third-party app 인스턴스 폴더들 (PengPort 가 만든 것) — app_id 별로 위치 해석.
+        //    해당 app 이 시스템에 없으면 지울 인스턴스 폴더도 없으므로 silent skip — failures 에
+        //    추가하면 사용자에게 "실패" 로 보여 혼란.
+        //
+        //    보안: 각 id 는 path traversal 차단 위해 validate_service_id 통과 강제
+        //    (`third_party_app_instance_dir` 내부에서도 재검증). 미통과 id 는 failures 에
+        //    기록하고 skip.
+        for target in &req.third_party_app_instances {
+            for id in &target.instance_ids {
                 if let Err(e) = pengport_shared::validate_service_id(id) {
                     report
                         .failures
-                        .push(format!("prism instance '{id}' (id 형식 오류): {e}"));
+                        .push(format!("{} instance '{id}' (id 형식 오류): {e}", target.app_id));
                     continue;
                 }
-                let dir = prism_paths.instance_dir(id);
-                if dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&dir) {
-                        report
-                            .failures
-                            .push(format!("prism instance '{id}': {e}"));
-                    } else {
-                        report.paths_removed.push(dir);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3) PengPort 의 모든 옛/현 식별자가 만든 사용자 폴더 통째로 삭제.
-    //    %APPDATA%/<id>/ 와 %LOCALAPPDATA%/<id>/ 두 곳 × ALL_FS_IDENTIFIERS.
-    //    포함되는 데이터: trust.json, prism_settings.toml, WebView2 EBWebView (localStorage
-    //    /IndexedDB/Cookies), bundled prism, bootstrap jar 등 PengPort 가 만든 것 전부.
-    let appdata = std::env::var_os("APPDATA");
-    let localappdata = std::env::var_os("LOCALAPPDATA");
-    for id in paths::ALL_FS_IDENTIFIERS {
-        for root_var in [&appdata, &localappdata] {
-            let Some(root) = root_var else { continue };
-            let dir = PathBuf::from(root).join(id);
-            if dir.exists() {
-                match std::fs::remove_dir_all(&dir) {
+                let Ok(dir) = library::third_party_app_instance_dir(&target.app_id, id) else {
+                    continue;
+                };
+                match remove_path_with_retries(&dir, 5) {
                     Ok(()) => report.paths_removed.push(dir),
                     Err(e) => report
                         .failures
-                        .push(format!("{}: {e}", dir.display())),
+                        .push(format!("{} instance '{id}': {e}", target.app_id)),
                 }
             }
         }
-    }
 
-    Ok(report)
+        // 3) PengPort 의 모든 옛/현 식별자가 만든 사용자 폴더 정리.
+        //    %APPDATA%/<id>/ 와 %LOCALAPPDATA%/<id>/ 두 곳 × ALL_FS_IDENTIFIERS — 폴더
+        //    자체를 통째로 `remove_dir_all` 하지 않고 **하위 항목을 하나씩** 지운다.
+        //    이유(실사용 중 발견): 이 초기화는 PengPort 자신을 종료하지 않으므로, 지금
+        //    이 프로세스의 webview 가 쓰고 있는 `EBWebView` 하위 폴더는 항상 잠겨 있어
+        //    못 지운다. 통째로 지우려 하면 그 하나 때문에 전체가 실패해서, 진짜 지워야
+        //    할 `prism_launcher` 같은 형제 폴더까지 같이 안 지워졌었다 — 개별 삭제로
+        //    바꾸면 `EBWebView`만 실패로 남고 나머지는 정상 삭제된다.
+        let appdata = std::env::var_os("APPDATA");
+        let localappdata = std::env::var_os("LOCALAPPDATA");
+        for id in paths::ALL_FS_IDENTIFIERS {
+            for root_var in [&appdata, &localappdata] {
+                let Some(root) = root_var else { continue };
+                let dir = PathBuf::from(root).join(id);
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    match remove_path_with_retries(&path, 5) {
+                        Ok(()) => report.paths_removed.push(path),
+                        Err(e) => report.failures.push(format!("{}: {e}", path.display())),
+                    }
+                }
+                // 하위 항목이 전부 지워졌으면(EBWebView 처럼 잠긴 게 없었으면) 이제 빈
+                // 폴더가 된 dir 자체도 정리 — 실패해도(아직 뭔가 남아있으면) 조용히 무시,
+                // 위에서 이미 그 원인은 failures 에 기록됨.
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e}"))?
+}
+
+/// 잠깐 잠겨 있을 수 있는 파일/폴더 삭제를 짧은 간격으로 재시도한다 — 방금 강제
+/// 종료한 프로세스가 파일 핸들을 실제로 놓기까지 살짝 지연이 있을 수 있어서, 얼마나
+/// 기다려야 할지 미리 알 수 없는 값을 고정 시간으로 추측하는 대신 "안 되면 곧 다시
+/// 시도"가 더 정확하다(환경마다 필요한 시간이 다름 — 느린 디스크, 백신 스캔 등).
+/// `max_attempts`로 무한 재시도는 방지 — 계속 잠겨있는 항목(예: 지금 실행 중인
+/// PengPort 자신의 webview 프로필)은 그 한도만큼만 시도하고 실패로 보고한다.
+fn remove_path_with_retries(path: &Path, max_attempts: u32) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut last_err = None;
+    for attempt in 0..max_attempts.max(1) {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        let result = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(_) if !path.exists() => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.expect("max_attempts.max(1) >= 1 이므로 최소 한 번은 시도해 last_err 가 채워짐"))
 }
 
 /// keyring entry 1개 정리. Ok(true)=삭제됨, Ok(false)=원래 없음.
@@ -170,54 +229,33 @@ fn keyring_clear(account: &str) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------
-// uninstall_self — Windows NSIS uninstaller 실행 + 자체 종료
+// uninstall_self — exe + data 폴더 자체 삭제 후 종료 (portable, 인스톨러 없음)
 // ---------------------------------------------------------------------------
 
-/// Windows: 레지스트리의 `Uninstall\<ProductName>` 에서 `UninstallString` 을 찾아 실행하고
-/// 자체 종료한다. NSIS uninstaller 가 PengPort.exe 를 lock 한 상태이면 실패하므로 우리는
-/// detached 로 spawn 후 즉시 종료.
+/// exe 파일과 `data/` 폴더를 지우고 자체 종료한다. Portable 모델이라 "삭제"엔 인스톨러가
+/// 관여하지 않는다 — PengPort 가 차지한 흔적은 이 둘뿐이다.
 ///
-/// 옛 productName ("PengdollPark") 의 uninstaller 도 등록되어 있으면 같이 spawn — 사용자가
-/// "완전 삭제" 의도로 호출했으니 모든 흔적 정리.
-///
-/// 추가로: NSIS 는 install path (Program Files\PengPort) 만 정리하고 user data
-/// (%LOCALAPPDATA%\PengPort\EBWebView 등) 는 보존하므로, background batch 로 ALL_FS_IDENTIFIERS
-/// 의 user data 폴더들을 PengPort 종료 직후 자동 정리.
-///
-/// `silent`: true 면 NSIS uninstaller 의 `/S` flag (silent uninstall) 사용 — 사용자에게 추가
-/// confirm dialog 없이 진행. ephemeral 모드 종료 시 자동 cleanup 흐름에 사용.
+/// kiosk(ephemeral) 모드 종료 자동 cleanup 전용 호출부(`App.tsx`) — 설정 화면엔 대응하는
+/// 수동 UI가 없다(사용자가 폴더를 직접 지우는 게 더 간단하고 확실해서 만들지 않음).
+/// 호출 전에 `wipe_all_data`가 이미 override 경로까지 인식하는 정리를 최대한 마쳤다고
+/// 가정 — 여기선 그게 못 지운 나머지(이 프로세스 자신이 지금 잠그고 있는 exe 파일과
+/// `EBWebView` 등)를 프로세스 종료 후 마저 정리한다.
 ///
 /// Windows 외 플랫폼에서는 미지원.
 #[tauri::command]
-pub async fn uninstall_self(app: AppHandle, silent: Option<bool>) -> Result<(), String> {
-    let silent = silent.unwrap_or(false);
+pub async fn uninstall_self(app: AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let mut spawned_any = false;
-        for product in paths::ALL_PRODUCT_NAMES {
-            if let Some(unins) = locate_uninstaller_windows(product) {
-                if let Err(e) = spawn_uninstaller_windows(&unins, silent) {
-                    eprintln!("uninstaller spawn 실패 ({}): {e}", product);
-                } else {
-                    spawned_any = true;
-                }
-            }
-        }
-        if !spawned_any {
-            if silent {
-                // silent 호출 (ephemeral 모드 종료 cleanup 등) — uninstaller 없어도 wipe + exit
-                // 흐름 그대로 진행. dev 빌드 (NSIS 안 거침) 또는 portable 빌드에서도 정상 동작.
-                eprintln!(
-                    "uninstaller 위치 못 찾음 — silent 모드라 wipe/exit 만 진행 (NSIS 설치본 아닌 빌드)"
-                );
-            } else {
-                return Err("uninstaller 위치를 찾을 수 없습니다 (이 빌드가 NSIS 설치본이 아닐 수 있음)".to_string());
-            }
-        }
-        // user data 폴더들을 5초 후 background 정리 — PengPort 종료 + webview2 자식 process 의
-        // lock 풀릴 시간 확보. NSIS 의 Program Files 정리와 별개.
-        schedule_userdata_cleanup_windows();
-        // 짧은 grace period 후 자체 종료.
+        // 삭제 전에 실행 중인 프로세스(프리즘 등) 강제 종료 — `wipe_all_data`와 같은 이유
+        // (그게 잠근 파일 때문에 아래 백그라운드 정리 스크립트의 삭제가 실패할 수 있음).
+        tauri::async_runtime::spawn_blocking(super::third_party_runtime::kill_all_running_blocking)
+            .await
+            .map_err(|e| format!("blocking task panic: {e}"))?;
+
+        schedule_self_removal_windows()?;
+
+        // 짧은 grace period 후 자체 종료 — 그 순간부터 exe 파일 잠금이 풀리고,
+        // 위에서 예약한 스크립트가 재시도 끝에 지운다.
         let app_for_exit = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -228,89 +266,52 @@ pub async fn uninstall_self(app: AppHandle, silent: Option<bool>) -> Result<(), 
 
     #[cfg(not(windows))]
     {
-        let _ = (app, silent);
+        let _ = app;
         Err("Windows 외 OS 미지원".to_string())
     }
 }
 
-/// PengPort 종료 후 5초 뒤 user data 폴더들을 정리하는 background cmd batch.
-/// detached + no-window 로 spawn 후 PengPort exit. webview2 자식 process 가 종료될 시간을
-/// 주기 위해 timeout. 각 rd 는 best-effort (lock 잡힌 항목 있으면 skip).
+/// PengPort 종료 후 exe 파일과 `data/` 폴더를 지우는 background .bat 스크립트를 생성해
+/// detached + no-window 로 실행한다.
+///
+/// **재시도 방식(고정 대기 아님)**: 이 프로세스와 webview2 자식 process 들이 종료 후
+/// 실제로 파일 핸들을 놓기까지 걸리는 시간은 환경(디스크 속도, 백신 스캔 등)마다
+/// 달라서, "몇 초 기다렸다가 딱 한 번 시도"는 부족하면 조용히 실패하고 충분하면 괜히
+/// 느리다. 대신 경로마다 "삭제 시도 → 실패하면 1초 후 재시도"를 **최대 15번**(무한
+/// 재시도 방지) 반복한다. 스크립트는 끝나면 자기 자신을 지운다.
 #[cfg(windows)]
-fn schedule_userdata_cleanup_windows() {
+fn schedule_self_removal_windows() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
-    let appdata = std::env::var_os("APPDATA").unwrap_or_default();
-    let localappdata = std::env::var_os("LOCALAPPDATA").unwrap_or_default();
+    let exe = std::env::current_exe().map_err(|e| format!("exe 경로 확인 실패: {e}"))?;
+    let data_dir =
+        paths::app_data_root().ok_or_else(|| "data 경로를 확인할 수 없습니다".to_string())?;
 
-    let mut parts: Vec<String> = vec!["timeout /t 5 /nobreak > nul".to_string()];
-    for id in paths::ALL_FS_IDENTIFIERS {
-        let p1 = PathBuf::from(&appdata).join(id);
-        let p2 = PathBuf::from(&localappdata).join(id);
-        parts.push(format!("rd /s /q \"{}\" 2>nul", p1.display()));
-        parts.push(format!("rd /s /q \"{}\" 2>nul", p2.display()));
-    }
-    let cmd = parts.join(" & ");
+    let mut script = String::from("@echo off\r\n");
+    script.push_str(&retry_delete_block("del /f /q", &exe, "exe_done"));
+    script.push_str(&retry_delete_block("rd /s /q", &data_dir, "data_done"));
+    script.push_str("del \"%~f0\"\r\n");
 
-    let _ = std::process::Command::new("cmd")
-        .args(["/c", &cmd])
+    let script_path =
+        std::env::temp_dir().join(format!("pengport-cleanup-{}.bat", std::process::id()));
+    std::fs::write(&script_path, script).map_err(|e| format!("정리 스크립트 생성 실패: {e}"))?;
+
+    std::process::Command::new("cmd")
+        .args(["/c", &script_path.to_string_lossy()])
         .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-        .spawn();
-}
-
-#[cfg(windows)]
-fn locate_uninstaller_windows(product: &str) -> Option<PathBuf> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
-    use winreg::RegKey;
-
-    let candidates = [
-        (
-            HKEY_CURRENT_USER,
-            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            format!(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{product}"),
-        ),
-    ];
-
-    for (hive, subkey) in candidates {
-        let root = RegKey::predef(hive);
-        let Ok(key) = root.open_subkey_with_flags(&subkey, KEY_READ) else {
-            continue;
-        };
-        let Ok(s): Result<String, _> = key.get_value("UninstallString") else {
-            continue;
-        };
-        // UninstallString 은 보통 따옴표 포함된 절대 경로. trim + 따옴표 제거.
-        let trimmed = s.trim().trim_matches('"');
-        let path = PathBuf::from(trimmed);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-#[cfg(windows)]
-fn spawn_uninstaller_windows(unins: &std::path::Path, silent: bool) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    // CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS — 부모(우리)가 죽어도 NSIS 가 살아있게.
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    let mut cmd = std::process::Command::new(unins);
-    if silent {
-        // NSIS 의 silent uninstall flag — 사용자 confirm dialog 없이 진행. ephemeral 모드 cleanup 용.
-        cmd.arg("/S");
-    }
-    cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("uninstaller spawn 실패 ({}): {e}", unins.display()))
+        .map_err(|e| format!("정리 스크립트 실행 실패: {e}"))
+}
+
+/// `delete_cmd`(`del /f /q` 또는 `rd /s /q`)로 `path`를 최대 15 회 재시도 삭제하는
+/// 배치 스크립트 블록 — 성공하면 `label`로 점프해 다음 블록으로 넘어간다.
+#[cfg(windows)]
+fn retry_delete_block(delete_cmd: &str, path: &Path, label: &str) -> String {
+    format!(
+        "for /l %%i in (1,1,15) do (\r\n  {delete_cmd} \"{p}\" 2>nul\r\n  if not exist \"{p}\" goto :{label}\r\n  timeout /t 1 /nobreak > nul\r\n)\r\n:{label}\r\n",
+        p = path.display(),
+    )
 }

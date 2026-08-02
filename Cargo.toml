@@ -9,7 +9,7 @@ members = [
 version = "0.1.8"
 edition = "2021"
 authors = ["pengport"]
-license = "AGPL-3.0-only"
+license = "GPL-3.0-only"
 repository = "https://github.com/LostCHoco/PengPort"
 
 [workspace.dependencies]
@@ -19,10 +19,19 @@ toml = "0.8"
 anyhow = "1"
 thiserror = "2"
 ureq = { version = "3", features = ["rustls", "json"] }
-craftping = "0.7"
 # Minecraft servers.dat (NBT) 자동 등록용. fastnbt 가 binary NBT 의 표준 라이브러리.
 fastnbt = "2"
 # Windows 레지스트리 읽기 (Prism InstallLocation 탐색용). 다른 OS 빌드에는 영향 없음.
 winreg = "0.55"
 # Prism Portable zip 자동 다운로드 + 풀기.
 zip = { version = "5", default-features = false, features = ["deflate"] }
+# 레시피 설치 아티팩트 SHA256 검증 (0.2.0 앱 라이브러리 트러스트 모델).
+sha2 = "0.10"
+# 라이브러리 항목을 링크(스냅샷 번들)로 인코딩 (0.2.0 Phase 2).
+base64 = "0.22"
+# portable_app 레시피의 .7z 아티팩트 압축 해제 (packwiz 팩 번들은 .zip 이라 기존 zip crate 유지,
+# 이건 게임 클라이언트 등 임의 다운로드형 앱 아카이브가 .7z 인 경우가 많아 추가).
+sevenz-rust2 = "0.21"
+# 레시피 번들 파일(.pengz) gzip 압축 — 이미 zip crate 의 deflate 기능을 통해 트리에
+# 들어와 있던 크레이트라 새 의존성 추가가 아님(신규 컴파일 대상 없음).
+flate2 = "1"

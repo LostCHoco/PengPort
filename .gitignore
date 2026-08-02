@@ -25,6 +25,7 @@ dist/
 docs/
 CLAUDE.md
 **/CLAUDE.md
+MEMORY.md
 
 # Tauri 산출물 (커스텀 빌드 결과)
 src-tauri/target/

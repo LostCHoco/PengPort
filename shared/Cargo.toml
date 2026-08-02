@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "PengPort 플랫폼/도구 간 공유 크레이트 (servers.toml 스키마 + 파서, CDN fetch 등)"
+description = "PengPort 플랫폼/도구 간 공유 크레이트 (앱 라이브러리 레시피 schema + 검증, trust store, prism sync 등)"
 
 [dependencies]
 serde = { workspace = true }
@@ -13,8 +13,17 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
-craftping = { workspace = true }
 fastnbt = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }
 
-# URL 파싱·검증 (PSP action handlers 의 url_check)
+# URL 파싱·검증 (action handlers 의 url_check)
 url = "2.5"
+# FolderRule 패턴(글롭) 매칭.
+glob = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+# third_party_app 의 Registry 탐지 전략 (Prism 등 Windows 프로그램의 Uninstall
+# InstallLocation 조회).
+winreg = { workspace = true }

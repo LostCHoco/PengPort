@@ -8,6 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Portal } from "@/components/ui/portal";
 
 export interface UpdatePromptInfo {
   version: string;
@@ -61,7 +62,7 @@ export function UpdatePromptDialog({ info, onDismiss }: Props) {
     setPhase({ kind: "installing" });
     try {
       await info.install();
-      // relaunch 후 이 줄은 도달 안 함.
+      // 성공하면 프로세스가 새 exe 로 교체되며 종료되므로 이 줄은 도달 안 함.
     } catch (e) {
       setPhase({ kind: "error", message: String(e) });
     }
@@ -72,6 +73,7 @@ export function UpdatePromptDialog({ info, onDismiss }: Props) {
   };
 
   return (
+    <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={handleBackdrop}
@@ -160,6 +162,7 @@ export function UpdatePromptDialog({ info, onDismiss }: Props) {
         </div>
       </div>
     </div>
+    </Portal>
   );
 }
 

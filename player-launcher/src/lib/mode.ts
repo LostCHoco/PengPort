@@ -4,7 +4,8 @@
 //
 // 사용자가 첫 실행 시 dialog 로 선택. localStorage 에 저장:
 //
-// - **normal**: 평소 PC. instance / token / Prism account 영구 저장. 다음 launch 부터 자동 로드.
+// - **normal**: 일반 모드. 평소 쓰는 내 PC — 라이브러리 / third-party 앱 계정 영구 저장.
+//   다음 launch 부터 자동 로드.
 //   localStorage 에 `pengport.mode = "normal"` 저장 → 다음부터 selector 안 묻기.
 //
 // - **ephemeral**: 공용 PC (PC방 등). 종료 시 모든 데이터 + PengPort 자체 자동 정리.

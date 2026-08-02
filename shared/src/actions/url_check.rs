@@ -37,17 +37,13 @@ pub enum UrlError {
 
 const BLOCKED_SCHEMES: &[&str] = &["file", "javascript", "data", "blob", "vbscript"];
 
-/// URL 이 모든 정책을 통과하는지 검증.
+/// scheme·host 안전성만 검증 (origin/allowlist 매칭 없음).
 ///
-/// `manifest_origin` 은 manifest 의 base URL (예: `https://service.example`).
-/// `external_urls` 는 manifest `permissions.external_urls` 패턴 목록.
-/// `allow_http` 는 dev 모드에서 true.
-pub fn is_url_allowed(
-    url: &str,
-    manifest_origin: &str,
-    external_urls: &[String],
-    allow_http: bool,
-) -> Result<(), UrlError> {
+/// 0.2.0 앱 라이브러리 모델에서는 레시피에 "origin"이 없다 — 레시피 항목이
+/// 직접 선언한 URL(`ArchiveExtraction.url` 등)은 별도 카탈로그 매니페스트가
+/// 없으므로 origin 매칭 대상이 없다. 그래도 scheme/private-host 안전 검사
+/// (SSRF·`file:`/`javascript:` 등 차단)는 여전히 필요 — 이 함수가 그 부분만 담당.
+pub fn is_url_safe(url: &str, allow_http: bool) -> Result<Url, UrlError> {
     let parsed = Url::parse(url).map_err(|e| UrlError::Parse(e.to_string()))?;
     let scheme = parsed.scheme();
 
@@ -75,7 +71,24 @@ pub fn is_url_allowed(
         return Err(UrlError::Parse("host 누락".to_string()));
     }
 
-    // 5. origin 매칭 또는 external_urls 패턴 매칭
+    Ok(parsed)
+}
+
+/// URL 이 모든 정책을 통과하는지 검증 (scheme/host 안전성 + origin/allowlist 매칭).
+///
+/// 옛 PSP manifest 모델(매니페스트가 하나의 "origin"을 가짐)에서 쓰던 함수 —
+/// `manifest_origin`/`external_urls` 개념이 남아있는 코드 경로(있다면)를 위해 유지.
+/// `manifest_origin` 은 base URL (예: `https://service.example`).
+/// `external_urls` 는 허용 패턴 목록. `allow_http` 는 dev 모드에서 true.
+pub fn is_url_allowed(
+    url: &str,
+    manifest_origin: &str,
+    external_urls: &[String],
+    allow_http: bool,
+) -> Result<(), UrlError> {
+    let parsed = is_url_safe(url, allow_http)?;
+
+    // origin 매칭 또는 external_urls 패턴 매칭
     let manifest = Url::parse(manifest_origin)
         .map_err(|e| UrlError::Parse(format!("manifest_origin: {e}")))?;
     if same_origin(&parsed, &manifest) {
@@ -138,7 +151,7 @@ fn glob_match(url: &Url, pattern: &str) -> bool {
         Some(h) => h,
         None => return false,
     };
-    if !host_match(url_host, &pat.host) {
+    if !host_match(url_host, pat.host) {
         return false;
     }
 
@@ -315,6 +328,33 @@ mod tests {
     fn invalid_url_rejected() {
         let r = is_url_allowed("not a url", "https://service.example", &[], false);
         assert!(matches!(r, Err(UrlError::Parse(_))));
+    }
+
+    #[test]
+    fn is_url_safe_https_ok() {
+        assert!(is_url_safe("https://cdn.example.com/pack.tar.gz", false).is_ok());
+    }
+
+    #[test]
+    fn is_url_safe_no_origin_restriction() {
+        // is_url_allowed 와 달리 origin/allowlist 매칭이 없어 임의 https 호스트도 통과.
+        assert!(is_url_safe("https://anything.example/x", false).is_ok());
+    }
+
+    #[test]
+    fn is_url_safe_rejects_private_host() {
+        assert!(matches!(
+            is_url_safe("https://192.168.1.10/x", false),
+            Err(UrlError::PrivateHost(_))
+        ));
+    }
+
+    #[test]
+    fn is_url_safe_rejects_file_scheme() {
+        assert!(matches!(
+            is_url_safe("file:///etc/passwd", false),
+            Err(UrlError::BlockedScheme(_))
+        ));
     }
 
     #[test]
