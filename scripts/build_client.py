@@ -170,14 +170,23 @@ def collect_release_assets(release_dir: Path, app_version: str) -> tuple[Path, P
 def sign_file(path: Path) -> Path:
     """`path`를 updater 서명 키로 minisign 서명 — `tauri signer sign`(Tauri CLI,
     NSIS 자동서명과 정확히 같은 포맷)을 그대로 재사용해서 `<path>.sig`를 만든다.
-    반환값은 그 서명 파일 경로."""
+    반환값은 그 서명 파일 경로.
+
+    키는 `-f`(파일 경로)가 아니라 `build_tauri()`와 똑같이 **내용을 읽어서 strip한
+    뒤 `TAURI_SIGNING_PRIVATE_KEY` 환경변수로 전달**한다 — `-f`는 파일 바이트를
+    그대로 읽어서, CI가 시크릿을 `printf '%s\\n'`으로 복원할 때 붙는 trailing
+    개행까지 키 내용으로 오인해 "Invalid symbol 10"(개행 문자) 디코드 에러로
+    실패했다(2026-08 실측, 로컬에선 파일에 그 개행이 없어서 안 걸렸음). 이 프로젝트
+    안에 이미 검증된 경로(env var, strip 됨)를 놔두고 새 경로를 만든 게 원인이라
+    같은 방식으로 통일."""
     key_path = ROOT / ".secrets" / "pengport-updater.key"
     if not key_path.exists():
         raise FileNotFoundError(f"서명 키 없음: {key_path}")
     env = os.environ.copy()
+    env["TAURI_SIGNING_PRIVATE_KEY"] = key_path.read_text(encoding="utf-8").strip()
     env.setdefault("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "")  # 비밀번호 없는 키
     run_env(
-        [PNPM, "run", "tauri", "signer", "sign", "-f", str(key_path), str(path)],
+        [PNPM, "run", "tauri", "signer", "sign", str(path)],
         cwd=ROOT / "player-launcher",
         env=env,
     )
