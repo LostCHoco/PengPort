@@ -843,7 +843,7 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
                       </Field>
                     ) : selectedKeys.size === 1 && selectedFolderPaths.length === 1 ? (
                       <Field
-                        label={`선택된 폴더: ${selectedFolderPaths[0]}`}
+                        label={`선택된 폴더: ${selectedFolderPaths[0] || "(루트)"}`}
                         action={
                           <div className="flex shrink-0 items-center gap-2">
                             <button

@@ -234,6 +234,7 @@ function TreeContextMenu({
   onDelete,
   onNewFile,
   onNewFolder,
+  onEditRootRule,
 }: {
   state: ContextMenuState;
   onClose: () => void;
@@ -246,6 +247,10 @@ function TreeContextMenu({
   onDelete: () => void;
   onNewFile: () => void;
   onNewFolder: () => void;
+  /** 루트는 트리에 행 자체가 없어(자식만 평탄화됨, `flattenVisibleTreeRows`) 좌클릭
+   * 선택으로 `FolderRuleEditor`를 열 방법이 없다 — 루트 전용으로 여기서 선택을
+   * 대신 만들어준다. */
+  onEditRootRule: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -300,6 +305,7 @@ function TreeContextMenu({
         className="fixed z-[70] w-48 overflow-hidden rounded-md border border-neutral-700 bg-neutral-900 py-1 shadow-lg"
         style={{ top: state.y, left: state.x }}
       >
+        {state.target.kind === "root" && item("루트 폴더 규칙 편집(전체 허용/필터링)", onEditRootRule)}
         {isFolderish && !isMulti && item("새 파일", onNewFile)}
         {isFolderish && !isMulti && item("새 폴더", onNewFolder)}
         {isNode && !isMulti && item("이름 바꾸기", onRename)}
@@ -842,6 +848,7 @@ export function FileTreeView({
             const folderPath = contextMenu.target.kind === "folder" ? contextMenu.target.path : "";
             setRenamingPath(onCreateFolder(folderPath));
           }}
+          onEditRootRule={() => onSelectionChange(new Set([folderKey("")]), folderKey(""))}
         />
       )}
     </div>
