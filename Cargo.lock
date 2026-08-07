@@ -2971,9 +2971,10 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pengport"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
+ "crc32fast",
  "glob",
  "keyring",
  "notify",
@@ -2993,7 +2994,6 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
- "toml 0.8.2",
  "ureq",
  "windows-sys 0.59.0",
  "winreg",
@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "pengport-shared"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "fastnbt",
@@ -3012,7 +3012,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
- "toml 0.8.2",
  "ureq",
  "url",
  "winreg",

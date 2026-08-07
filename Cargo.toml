@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["pengport"]
 license = "GPL-3.0-only"
@@ -15,7 +15,6 @@ repository = "https://github.com/LostCHoco/PengPort"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
 anyhow = "1"
 thiserror = "2"
 ureq = { version = "3", features = ["rustls", "json"] }
@@ -35,3 +34,6 @@ sevenz-rust2 = "0.21"
 # 레시피 번들 파일(.pengz) gzip 압축 — 이미 zip crate 의 deflate 기능을 통해 트리에
 # 들어와 있던 크레이트라 새 의존성 추가가 아님(신규 컴파일 대상 없음).
 flate2 = "1"
+# 압축 해제 파일명 충돌 감지용 — zip/sevenz-rust2 둘 다 내부적으로 이미 쓰는
+# 크레이트라 신규 컴파일 대상 아님(트리에 이미 있던 버전 재사용).
+crc32fast = "1"
