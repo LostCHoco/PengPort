@@ -1,23 +1,19 @@
 name: Release
 
 # Tag push (v0.1.1, v0.2.0 등) 또는 수동 실행 시 PengPort 클라이언트를 빌드하여
-# 인스턴스의 self-hosted updates endpoint 에 SCP 배포.
+# GitHub Release로 배포(포터블 zip + 자동 업데이트용 raw exe/서명/latest.json).
 #
-# 펭돌서버 instance 의 oracle Caddy 가 Bearer 토큰 보호된 file_server 로 서빙.
-# 다른 instance 운영자가 fork 시 GH Secrets 만 자기 환경에 맞게 채우면 동일하게 작동.
-#
-# SSH 권한 격리: deploy 는 격리된 SFTP-only user (예: pengport-updater) 만 사용.
-#   - oracle 의 그 user 는 `restrict,command="internal-sftp"` 로 shell/임의 명령 차단
-#   - file permission 으로 그 user home 만 접근 가능 (ubuntu user 의 secrets 는 격리)
+# 2026-08 이전엔 오라클 self-hosted endpoint에 SCP 배포했으나, 그 endpoint가
+# 인증 없는 공개 경로라 트래픽 폭주(EDoS) 표적이 될 수 있고 Oracle Free Tier는
+# 트래픽 초과 시 차단이 아니라 그대로 과금돼서(사용자 확인) GitHub Release로
+# 전환 — GitHub은 이런 트래픽에 사실상 무제한이고 과금도 없음.
+# `releases/latest/download/<파일명>` 이 태그가 바뀌어도 항상 최신 release를
+# 가리키는 고정 주소라 updater가 필요로 하는 "안 바뀌는 폴링 URL" 요건을 만족한다
+# (`player-launcher/src-tauri/tauri.conf.json`의 `plugins.updater.endpoints`).
 #
 # 필요 GH Secrets (Settings → Secrets and variables → Actions):
 #   - TAURI_SIGNING_PRIVATE_KEY        : minisign 서명 키 (.secrets/pengport-updater.key 내용)
 #   - TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 서명 키 password (현재 빈 값)
-#   - ORACLE_SSH_PRIVATE_KEY           : SFTP 인증용 private key (pengport-updater 의 authorized_keys 와 짝)
-#   - ORACLE_KNOWN_HOSTS               : ssh-keyscan 결과 (MITM 방지)
-#   - ORACLE_HOST                      : oracle 의 hostname (예: pengdoll.duckdns.org)
-#   - ORACLE_USER                      : 격리된 deploy user (예: pengport-updater) — ubuntu 가 아님
-#   - ORACLE_PORT                      : oracle 의 SSH port (예: 2222)
 #
 # 자세한 셋업 가이드: docs/guide/release-automation.md
 
@@ -96,33 +92,6 @@ jobs:
           rustup default stable
           rustup show
 
-      - name: Setup SSH (oracle deploy alias)
-        shell: bash
-        env:
-          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
-          ORACLE_USER: ${{ secrets.ORACLE_USER }}
-          ORACLE_PORT: ${{ secrets.ORACLE_PORT }}
-          ORACLE_SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
-          ORACLE_KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$ORACLE_SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$ORACLE_KNOWN_HOSTS" >> ~/.ssh/known_hosts
-          cat > ~/.ssh/config <<EOF
-          Host oracle
-            HostName $ORACLE_HOST
-            User $ORACLE_USER
-            Port $ORACLE_PORT
-            IdentityFile ~/.ssh/deploy_key
-            StrictHostKeyChecking yes
-          EOF
-          chmod 600 ~/.ssh/config
-          # SFTP 연결 테스트 (ForceCommand internal-sftp 환경 호환).
-          # 일반 ssh 명령은 차단되므로 sftp client 로 인증/호스트키만 검증.
-          echo "exit" | sftp -b - oracle && echo "✓ SFTP 인증 OK"
-
       - name: Restore Tauri signing key
         shell: bash
         env:
@@ -131,25 +100,22 @@ jobs:
           mkdir -p .secrets
           printf '%s\n' "$KEY" > .secrets/pengport-updater.key
 
-      - name: Build and deploy (build_client.py)
+      - name: Build (build_client.py)
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # build_client.py 가 SSH_HOST 가 비어있지 않을 때만 SCP. workflow 에서 활성화.
-          PENGPORT_DEPLOY_SSH_HOST: oracle
-          PENGPORT_DEPLOY_UPDATES_DIR: "~/updates"
         run: python scripts/build_client.py
 
-      - name: Publish GitHub Release (portable zip)
-        # 태그 push일 때만 — workflow_dispatch 수동 실행엔 붙일 태그가 없음. 신규
-        # 사용자용 첫 배포 산출물(설치 프로그램 없음, 포터블 zip 전용 — build_client.py
-        # 모듈 docstring 참고)을 오라클 self-update endpoint와 별개로 공개 다운로드
-        # 가능하게 GitHub Release에도 남긴다. 내부 스테이징 파일명(`PengPort-v3.zip`,
-        # "v3"는 배포 세대 라벨이지 앱 버전이 아님)은 그대로 두되, 업로드 전에 실제
-        # 버전이 담긴 이름으로 복사해서 그 파일을 올린다 — `gh release create`의
-        # `path#label` 문법은 GitHub UI에 곁들이는 부가 설명만 바꿀 뿐 실제 다운로드
-        # 파일명(`name`)은 그대로라(2026-08 실측, v0.2.3에서 확인) 원본 그대로 못 씀.
-        # 재실행 대비 --clobber fallback.
+      - name: Publish GitHub Release
+        # 태그 push일 때만 — workflow_dispatch 수동 실행엔 붙일 태그가 없음. 포터블
+        # zip(신규 사용자용 첫 배포 산출물 — 설치 프로그램 없음, build_client.py 모듈
+        # docstring 참고) + 자동 업데이트 3종(raw exe/서명/latest.json)을 전부 같은
+        # release에 올린다 — latest.json의 url이 이 release의
+        # `releases/latest/download/<파일명>`을 가리키므로(build_client.py의
+        # UPDATES_BASE_URL) 같은 release에 있어야 함. 포터블 zip은 내부 스테이징
+        # 파일명("v3"는 배포 세대 라벨, 앱 버전 아님) 대신 실제 버전으로 복사해서
+        # 올린다(`path#label` 문법은 GitHub UI 부가 설명만 바꾸고 실제 다운로드
+        # 파일명은 안 바뀜 — 2026-08 v0.2.3에서 실측 확인). 재실행 대비 --clobber.
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
@@ -157,15 +123,13 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           ZIP=$(ls client/build/PengPort-*.zip | head -1)
-          ASSET_PATH="client/build/PengPort-${TAG#v}-portable.zip"
-          cp "$ZIP" "$ASSET_PATH"
-          gh release create "$TAG" "$ASSET_PATH" --title "$TAG" --generate-notes \
-            || gh release upload "$TAG" "$ASSET_PATH" --clobber
+          PORTABLE="client/build/PengPort-${TAG#v}-portable.zip"
+          cp "$ZIP" "$PORTABLE"
+          ASSETS=("$PORTABLE" client/build/release-*/*)
+          gh release create "$TAG" "${ASSETS[@]}" --title "$TAG" --generate-notes \
+            || gh release upload "$TAG" "${ASSETS[@]}" --clobber
 
       - name: Cleanup secrets
         if: always()
         shell: bash
-        run: |
-          rm -f .secrets/pengport-updater.key
-          rm -f ~/.ssh/deploy_key
-          rm -f ~/.ssh/config
+        run: rm -f .secrets/pengport-updater.key

@@ -12,7 +12,7 @@ build_client.py — PengPort 배포 번들 빌드.
                                       # 업데이트(자체 rename-to-delete 업데이터)가 받는 대상
      PengPort-{X.Y.Z}.exe.sig        # 위 exe의 minisign 서명
      latest.json                     # Tauri updater manifest, url → 위 exe
-                                      # (https://pengdoll.duckdns.org/updates/...)
+                                      # (GitHub Release, releases/latest/download/...)
 
 PrismLauncher 는 더 이상 번들링하지 않는다. PengPort 가 첫 실행 시 시스템에 설치된
 Prism 을 자동 탐색하며, 못 찾으면 OOBE 에서 안내한다 (Phase 3 에서 자동 다운로드 추가 예정).
@@ -48,22 +48,17 @@ TAURI_CONF = ROOT / "player-launcher" / "src-tauri" / "tauri.conf.json"
 # Windows 의 pnpm 은 .cmd 파일이므로 subprocess 가 찾도록 확장자 명시.
 PNPM = "pnpm.cmd" if sys.platform == "win32" else "pnpm"
 
-# Self-hosted update endpoint. installer/sig/latest.json 모두 같은 디렉터리에 배치.
-# Caddy 가 file_server 로 정적 서빙 (public — PSP 정신상 client 는 software,
-# instance-agnostic 이라 누구나 다운로드. instance 접근만 EVENTS_TOKEN 으로 보호).
-# instance 별로 도메인이 다르므로 환경변수 override 가능 (GH Actions / 다른 instance fork).
+# Self-hosted update endpoint 대신 GitHub Release 사용(2026-08 전환) — latest.json이
+# 오라클(공개·인증없는 endpoint)에 있으면 그 자체가 악의적 트래픽 폭주의 표적이 되고,
+# Oracle Free Tier는 트래픽 초과 시 차단이 아니라 그대로 과금된다(EDoS 위험). GitHub의
+# `releases/latest/download/<파일명>`은 태그가 바뀌어도 항상 최신 release로 연결되는
+# 안정 주소라 updater 가 필요로 하는 "고정 폴링 URL" 요건을 그대로 만족한다. GitHub은
+# 이런 트래픽에 사실상 무제한이고 과금도 없음. instance 별로 repo가 다르므로 환경변수
+# override 가능 (다른 instance fork).
 UPDATES_BASE_URL = os.environ.get(
     "PENGPORT_UPDATES_BASE_URL",
-    "https://pengdoll.duckdns.org/updates",
+    "https://github.com/LostCHoco/PengPort/releases/latest/download",
 )
-
-# 자동 업로드 설정.
-# - PENGPORT_DEPLOY_SSH_HOST: SCP 대상 ssh config alias. 비어있으면 upload skip.
-#   본격 release 는 GH Actions tag push (release.yml) 로만 — laptop 은 build-only.
-# - PENGPORT_DEPLOY_UPDATES_DIR: 원격 호스트의 caddy mount source 디렉토리 경로.
-#   pengport-updater user 의 home (`~`) 기준 — 격리된 sftp-only 계정.
-SSH_HOST = os.environ.get("PENGPORT_DEPLOY_SSH_HOST", "")
-REMOTE_UPDATES_DIR = os.environ.get("PENGPORT_DEPLOY_UPDATES_DIR", "~/updates")
 
 
 def read_tauri_conf() -> dict:
@@ -97,33 +92,6 @@ def build_tauri() -> Path:
     if not exe.exists():
         raise FileNotFoundError(f"Tauri 빌드 산출물을 찾을 수 없습니다: {exe}")
     return exe
-
-
-def upload_release(release_dir: Path) -> None:
-    """release_dir 의 파일들을 deploy host 의 updates/ 디렉토리로 SCP.
-
-    deploy 대상은 SFTP-only 격리 계정 (예: pengport-updater) — restrict + ForceCommand
-    internal-sftp 로 강제되어 있어 ssh shell / 임의 명령 실행 불가.
-    따라서 stale 정리도 SCP 로 새 파일을 업로드하면 동일 이름은 자연 덮어씌워지고,
-    이전 productName 잔재 등은 별도 명령(ssh) 으로 못 지우므로 사용자가 수동 정리.
-
-    SSH_HOST 가 비어있으면 upload 자체를 skip (laptop 의 build-only 모드)."""
-    if not SSH_HOST:
-        print("[skip] upload: PENGPORT_DEPLOY_SSH_HOST 환경변수 없음")
-        print("       laptop 에서는 build-only — release 는 GH Actions tag push 로만 진행")
-        return
-
-    files = sorted(release_dir.iterdir())
-    if not files:
-        print(f"[skip] upload: {release_dir} 비어있음")
-        return
-
-    # SCP 는 single shot 으로 여러 파일 가능. 절대경로 보장.
-    # OpenSSH 9+ 의 scp 는 sftp protocol backend 로 작동 → ForceCommand internal-sftp 와 호환.
-    cmd = ["scp", *[str(f) for f in files], f"{SSH_HOST}:{REMOTE_UPDATES_DIR}/"]
-    print(f"$ {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    print(f"[OK] uploaded {len(files)} files to {SSH_HOST}:{REMOTE_UPDATES_DIR}/")
 
 
 def sign_file(path: Path) -> Path:
@@ -253,8 +221,6 @@ def main() -> int:
     ap.add_argument("--skip-build", action="store_true", help="Tauri 빌드 생략 (기존 산출물 재사용)")
     ap.add_argument("--skip-release", action="store_true",
                     help="release assets(latest.json 등) 생성 생략 (portable zip 만)")
-    ap.add_argument("--no-upload", action="store_true",
-                    help="release assets 의 Oracle 자동 SCP 업로드 생략")
     args = ap.parse_args()
 
     # Tauri 의 실제 앱 버전은 tauri.conf.json 의 version 필드가 출처.
@@ -302,18 +268,9 @@ def main() -> int:
     print(f"[OK] update asset (raw exe): {asset} ({asset_mb:.1f} MB)")
     print(f"[OK] signature:              {sig}")
     print(f"[OK] latest.json:            {manifest}")
-
-    # 3) Oracle 자동 업로드
-    if args.no_upload:
-        print("[skip] upload (--no-upload). 수동 업로드:")
-        print(f"  scp {release_dir}/* {SSH_HOST}:{REMOTE_UPDATES_DIR}/")
-    else:
-        try:
-            upload_release(release_dir)
-            print(f"\n[DONE] 자동 업데이트 배포 완료. endpoint: {UPDATES_BASE_URL}/latest.json")
-        except subprocess.CalledProcessError as e:
-            print(f"[WARN] 업로드 실패 (exit {e.returncode}). 수동 업로드 필요.", file=sys.stderr)
-            return 1
+    # 실제 GitHub Release 업로드는 release.yml의 별도 단계(gh release create/upload)가
+    # 담당 — 이 스크립트는 빌드/서명까지만, laptop에서 --skip-build 없이 그냥 돌려도
+    # 아무 데도 안 올라가고 로컬 산출물만 남는다(안전).
     return 0
 
 
