@@ -43,7 +43,7 @@ jobs:
         run: |
           # 네 값을 모두 일치시켜야 한다.
           # - tag                : GH Releases / 버전 식별용
-          # - tauri.conf.json    : NSIS installer 의 ProductVersion + latest.json 의 version
+          # - tauri.conf.json    : latest.json 의 version (설치 프로그램 없음, 포터블 전용)
           # - Cargo.toml         : binary 의 CARGO_PKG_VERSION (= tauri 의 getVersion() / updater 의
           #                       self-version 비교 기준). 한쪽만 bump 하면 0.1.0 → 0.1.1 update
           #                       후에도 self-version 이 0.1.0 그대로라 무한 update 루프 발생.

@@ -2,20 +2,17 @@
 """
 build_client.py — PengPort 배포 번들 빌드.
 
-산출물:
+산출물 — 설치 프로그램(NSIS) 없음, 포터블 전용(2026-08 확정: NSIS installer가 자체
+업데이트 흐름에서 실행 파일을 설치 마법사로 바꿔치기하는 사고를 냈고, 애초에 "원클릭
+실행" 컨셉상 설치 과정 자체가 불필요 — 첫 배포도 포터블 zip 하나로 통일):
 1) Portable zip   (`client/build/PengPort-{version}.zip`)
      PengPort.exe                # Tauri release 바이너리 — 원클릭 컨셉상 안내문 없음
 2) Release assets (`client/build/release-{version}/`)
-     PengPort-{X.Y.Z}.exe            # raw exe(NSIS 래핑 안 됨) — 자동 업데이트(자체
-                                      # rename-to-delete 업데이터)가 받는 실제 대상
-     PengPort-{X.Y.Z}.exe.sig        # 위 raw exe의 minisign 서명
-     latest.json                     # Tauri updater manifest, url → 위 raw exe
+     PengPort-{X.Y.Z}.exe            # 위 exe와 같은 바이너리, 버전 붙은 이름 — 자동
+                                      # 업데이트(자체 rename-to-delete 업데이터)가 받는 대상
+     PengPort-{X.Y.Z}.exe.sig        # 위 exe의 minisign 서명
+     latest.json                     # Tauri updater manifest, url → 위 exe
                                       # (https://pengdoll.duckdns.org/updates/...)
-     PengPort_{X.Y.Z}_x64-setup.exe     # NSIS installer — 수동 배포/신규 사용자용일 뿐,
-     PengPort_{X.Y.Z}_x64-setup.exe.sig # latest.json 대상 아님(자동 업데이트가 이걸
-                                         # 받으면 다음 실행 시 installer 가 열려버림 —
-                                         # 2026-08 실제 사고, collect_and_sign_raw_exe
-                                         # 문서 참고)
 
 PrismLauncher 는 더 이상 번들링하지 않는다. PengPort 가 첫 실행 시 시스템에 설치된
 Prism 을 자동 탐색하며, 못 찾으면 OOBE 에서 안내한다 (Phase 3 에서 자동 다운로드 추가 예정).
@@ -79,8 +76,10 @@ def run(cmd: list[str], cwd: Path | None = None) -> None:
 
 
 def build_tauri() -> Path:
-    """Tauri release 빌드 실행 (NSIS installer + 서명 포함). 결과 exe 경로 반환.
-    서명 키가 `.secrets/pengport-updater.key` 에 있으면 자동으로 서명 (.sig 생성)."""
+    """Tauri release 빌드 실행. 결과 exe 경로 반환 — bundling은 tauri.conf.json의
+    `bundle.active: false`로 항상 꺼져 있어(설치 프로그램 없음, 포터블 전용) 순수
+    바이너리 컴파일만 한다. 서명은 이 함수가 아니라 `sign_file`/
+    `collect_and_sign_raw_exe`가 별도로 처리(raw exe에 직접)."""
     env = os.environ.copy()
     # sccache 미사용 강제 — release 빌드는 새 의존성이 추가된 직후처럼 미캐시
     # 컴파일이 한꺼번에 몰릴 때 Windows 전용 레이스(sccache 서버가 동시에 여러
@@ -90,18 +89,9 @@ def build_tauri() -> Path:
     # release 는 배포 시점에만 드물게 돌아 캐시 이득 손실이 미미하므로, `pnpm tauri dev`
     # 개발 루프(캐시 히트가 잦아 sccache 이득이 큼)는 그대로 두고 이 경로만 우회한다.
     env["RUSTC_WRAPPER"] = ""
-    key_path = ROOT / ".secrets" / "pengport-updater.key"
-    if key_path.exists():
-        env["TAURI_SIGNING_PRIVATE_KEY"] = key_path.read_text(encoding="utf-8").strip()
-        env["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"] = ""  # 비밀번호 없는 키
-        print(f"[signing] private key loaded from {key_path}")
-    else:
-        print(f"[signing] no key at {key_path} — unsigned build (NSIS .sig 생성 안됨)")
 
     run_env([PNPM, "install", "--frozen-lockfile"], cwd=ROOT / "player-launcher", env=env)
-    # NSIS 만 빌드 (updater 는 NSIS 기반). MSI 는 필요 시 별도 target 로 추가.
-    run_env([PNPM, "run", "tauri", "build", "--bundles", "nsis"],
-            cwd=ROOT / "player-launcher", env=env)
+    run_env([PNPM, "run", "tauri", "build"], cwd=ROOT / "player-launcher", env=env)
     # Cargo crate 이름이 'pengport' 이라 산출물도 같은 이름.
     exe = ROOT / "target" / "release" / "pengport.exe"
     if not exe.exists():
@@ -136,49 +126,9 @@ def upload_release(release_dir: Path) -> None:
     print(f"[OK] uploaded {len(files)} files to {SSH_HOST}:{REMOTE_UPDATES_DIR}/")
 
 
-def collect_release_assets(release_dir: Path, app_version: str) -> tuple[Path, Path]:
-    """현재 tauri.conf.json 의 (productName, version) 조합으로 정확한 NSIS 산출물을
-    찾아 release 디렉터리로 복사. 이전 빌드 잔재가 NSIS 폴더에 남아있어도 정확한
-    파일을 매칭하므로 안전.
-    (installer_out, sig_out) 반환."""
-    nsis_dir = ROOT / "target" / "release" / "bundle" / "nsis"
-    if not nsis_dir.exists():
-        raise FileNotFoundError(f"NSIS 빌드 디렉터리 없음: {nsis_dir}")
-
-    # Tauri NSIS 산출물 명명 규칙: `<productName>_<version>_x64-setup.exe`
-    product_name = read_tauri_conf()["productName"]
-    installer_src = nsis_dir / f"{product_name}_{app_version}_x64-setup.exe"
-    if not installer_src.is_file():
-        # 실패 시 같은 폴더의 다른 산출물 목록도 함께 보여 디버깅 도움.
-        siblings = sorted(nsis_dir.glob("*_x64-setup.exe"))
-        raise FileNotFoundError(
-            f"NSIS installer 없음: {installer_src.name}\n"
-            f"NSIS 폴더의 산출물: {[p.name for p in siblings]}\n"
-            f"→ Tauri 빌드가 정상 완료됐는지, productName/version 이 일치하는지 확인."
-        )
-    # Tauri 는 `<installer>.exe.sig` 형태로 서명 파일을 나란히 둠.
-    sig_src = installer_src.parent / (installer_src.name + ".sig")
-    if not sig_src.is_file():
-        raise FileNotFoundError(
-            f"서명 파일 없음: {sig_src}\n"
-            "→ `.secrets/pengport-updater.key` 가 있는지 확인하세요."
-        )
-
-    # 깨끗한 release_dir 로 시작 (이전 빌드의 다른 이름 산출물이 SCP 로 함께 올라가는 것 방지).
-    if release_dir.exists():
-        shutil.rmtree(release_dir)
-    release_dir.mkdir(parents=True)
-    installer_out = release_dir / installer_src.name
-    sig_out = release_dir / sig_src.name
-    shutil.copy2(installer_src, installer_out)
-    shutil.copy2(sig_src, sig_out)
-    return installer_out, sig_out
-
-
 def sign_file(path: Path) -> Path:
-    """`path`를 updater 서명 키로 minisign 서명 — `tauri signer sign`(Tauri CLI,
-    NSIS 자동서명과 정확히 같은 포맷)을 그대로 재사용해서 `<path>.sig`를 만든다.
-    반환값은 그 서명 파일 경로.
+    """`path`를 updater 서명 키로 minisign 서명 — `tauri signer sign`(Tauri CLI)을
+    그대로 재사용해서 `<path>.sig`를 만든다. 반환값은 그 서명 파일 경로.
 
     키는 `-f`(파일 경로)가 아니라 `build_tauri()`와 똑같이 **내용을 읽어서 strip한
     뒤 `TAURI_SIGNING_PRIVATE_KEY` 환경변수로 전달**한다 — `-f`는 파일 바이트를
@@ -205,18 +155,16 @@ def sign_file(path: Path) -> Path:
 
 
 def collect_and_sign_raw_exe(release_dir: Path, exe: Path, app_version: str) -> tuple[Path, Path]:
-    """raw Tauri exe(NSIS 래핑 안 됨)를 release_dir 에 버전 붙은 이름으로 복사하고
-    updater 서명 키로 직접 서명한다.
+    """Tauri exe를 release_dir 에 버전 붙은 이름으로 복사하고 updater 서명 키로
+    직접 서명한다.
 
     자체 업데이터(`commands/self_update.rs`)는 `latest.json`이 가리키는 바이트를
-    그대로 실행 파일 자리에 rename-to-delete 로 앉힌다 — 그 자산이 NSIS 인스톨러면
-    다음 실행 시 PengPort.exe 가 사실은 설치 마법사가 되어버린다. **2026-08 실제
-    사고**: 이 구분 없이 NSIS installer 를 그대로 `write_latest_json`에 넘겼다가
-    0.2.0→0.2.1 자체 업데이트가 실사용자의 PengPort.exe 를 설치 마법사로 바꿔버림
-    (다행히 rename-to-delete 가 원본을 `PengPort.old.exe`로 보존해둬서 복구는 됨).
-    portable 모델에서 자체 업데이트 자산은 항상 이 raw exe여야 한다 — NSIS installer
-    는 (아직 남아있다면) 별개의 수동 설치용 산출물일 뿐, latest.json 대상이 아니다.
-    (exe_out, sig_out) 반환."""
+    그대로 실행 파일 자리에 rename-to-delete 로 앉힌다. **2026-08 실제 사고**: 한때
+    빌드가 NSIS installer도 같이 만들었는데, 그걸 구분 없이 `write_latest_json`에
+    넘겼다가 0.2.0→0.2.1 자체 업데이트가 실사용자의 PengPort.exe 를 설치 마법사로
+    바꿔버림(다행히 rename-to-delete 가 원본을 `PengPort.old.exe`로 보존해둬서 복구는
+    됨) — 이 사고가 NSIS installer를 완전히 없애고 포터블 전용으로 간 계기(위 모듈
+    docstring 참고). (exe_out, sig_out) 반환."""
     exe_out = release_dir / f"PengPort-{app_version}.exe"
     shutil.copy2(exe, exe_out)
     sig_out = sign_file(exe_out)
@@ -226,9 +174,8 @@ def collect_and_sign_raw_exe(release_dir: Path, exe: Path, app_version: str) -> 
 def write_latest_json(release_dir: Path, asset: Path, sig: Path, app_version: str) -> Path:
     """Tauri updater 가 읽는 manifest 생성.
     endpoints (tauri.conf.json) 는 `latest.json` 을 가리키고,
-    여기 포함된 url 로 클라가 asset(raw exe — `collect_and_sign_raw_exe` 참고, NSIS
-    인스톨러 아님)을 받음. URL 인코딩이 필요한 문자는 한 번에 quote 처리 (파일명에
-    공백 등 들어가도 안전)."""
+    여기 포함된 url 로 클라가 asset(exe — `collect_and_sign_raw_exe` 참고)을 받음.
+    URL 인코딩이 필요한 문자는 한 번에 quote 처리 (파일명에 공백 등 들어가도 안전)."""
     from urllib.parse import quote
 
     signature = sig.read_text(encoding="utf-8").strip()
@@ -305,7 +252,7 @@ def main() -> int:
     ap.add_argument("--version", default="v3", help="Portable zip 라벨 (배포 세대 구분용)")
     ap.add_argument("--skip-build", action="store_true", help="Tauri 빌드 생략 (기존 산출물 재사용)")
     ap.add_argument("--skip-release", action="store_true",
-                    help="NSIS installer / latest.json 생성 생략 (portable zip 만)")
+                    help="release assets(latest.json 등) 생성 생략 (portable zip 만)")
     ap.add_argument("--no-upload", action="store_true",
                     help="release assets 의 Oracle 자동 SCP 업로드 생략")
     args = ap.parse_args()
@@ -338,16 +285,10 @@ def main() -> int:
         print("[skip] release assets (--skip-release)")
         return 0
 
-    # NSIS installer 는 latest.json 대상이 아니다(아래 collect_and_sign_raw_exe
-    # 문서 참고) — 수동 배포/신규 사용자용 산출물로만 같이 챙긴다. 이 수집이 release_dir
-    # 를 먼저 비우고 새로 만드므로(collect_release_assets 참고) raw exe 수집보다 먼저.
-    try:
-        installer, _installer_sig = collect_release_assets(release_dir, app_version)
-        inst_mb = installer.stat().st_size / (1024 * 1024)
-        print(f"[OK] NSIS installer (수동 배포용, 자동 업데이트 대상 아님): {installer} ({inst_mb:.1f} MB)")
-    except FileNotFoundError as e:
-        print(f"[WARN] NSIS installer 수집 실패(자동 업데이트엔 영향 없음, 계속 진행): {e}", file=sys.stderr)
-        release_dir.mkdir(parents=True, exist_ok=True)
+    # 깨끗한 release_dir 로 시작(이전 빌드 잔재가 SCP 로 함께 올라가는 것 방지).
+    if release_dir.exists():
+        shutil.rmtree(release_dir)
+    release_dir.mkdir(parents=True)
 
     try:
         asset, sig = collect_and_sign_raw_exe(release_dir, exe, app_version)
