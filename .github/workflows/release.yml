@@ -29,6 +29,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write # gh release create/upload
     # actions/checkout@v4, actions/setup-node@v4, actions/setup-python@v5 들이 내부적으로
     # Node 20 사용 중인데 deprecated (Sep 2026 제거). 새 major 가 나오기 전까지 임시로
     # Node 24 강제 (2026-06-02 부터는 default 가 Node 24 라 이 줄 제거 예정).
@@ -137,6 +139,24 @@ jobs:
           PENGPORT_DEPLOY_SSH_HOST: oracle
           PENGPORT_DEPLOY_UPDATES_DIR: "~/updates"
         run: python scripts/build_client.py
+
+      - name: Publish GitHub Release (portable zip)
+        # 태그 push일 때만 — workflow_dispatch 수동 실행엔 붙일 태그가 없음. 신규
+        # 사용자용 첫 배포 산출물(설치 프로그램 없음, 포터블 zip 전용 — build_client.py
+        # 모듈 docstring 참고)을 오라클 self-update endpoint와 별개로 공개 다운로드
+        # 가능하게 GitHub Release에도 남긴다. 내부 스테이징 파일명(`PengPort-v3.zip`,
+        # "v3"는 배포 세대 라벨이지 앱 버전이 아님)은 그대로 두고 업로드 시 표시
+        # 이름만 실제 버전으로(`path#display-name` 문법) — 재실행 대비 --clobber fallback.
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ZIP=$(ls client/build/PengPort-*.zip | head -1)
+          ASSET_NAME="PengPort-${TAG#v}-portable.zip"
+          gh release create "$TAG" "$ZIP#$ASSET_NAME" --title "$TAG" --generate-notes \
+            || gh release upload "$TAG" "$ZIP#$ASSET_NAME" --clobber
 
       - name: Cleanup secrets
         if: always()
