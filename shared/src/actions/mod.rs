@@ -262,14 +262,14 @@ mod tests {
             },
         );
         recipe.optional_groups.push(crate::library::OptionalGroup {
-            id: "esong".to_string(),
+            id: "groupa".to_string(),
             label: "테스트 그룹".to_string(),
             default_selected: true,
         });
         recipe.files.push(crate::library::RecipeFile {
-            path: "ESong/song.bin".to_string(),
+            path: "GroupA/song.bin".to_string(),
             override_content: None,
-            optional_group: Some("esong".to_string()),
+            optional_group: Some("groupa".to_string()),
         });
         assert!(validate_recipe(&recipe, &ctx()).is_ok());
     }
@@ -284,9 +284,9 @@ mod tests {
             },
         );
         recipe.files.push(crate::library::RecipeFile {
-            path: "ESong/song.bin".to_string(),
+            path: "GroupA/song.bin".to_string(),
             override_content: None,
-            optional_group: Some("esong".to_string()),
+            optional_group: Some("groupa".to_string()),
         });
         let err = validate_recipe(&recipe, &ctx()).unwrap_err();
         assert!(matches!(err, ActionError::InvalidConfig(_)));
@@ -303,7 +303,7 @@ mod tests {
         );
         for _ in 0..2 {
             recipe.optional_groups.push(crate::library::OptionalGroup {
-                id: "esong".to_string(),
+                id: "groupa".to_string(),
                 label: "테스트 그룹".to_string(),
                 default_selected: false,
             });
@@ -375,7 +375,7 @@ mod tests {
         for _ in 0..2 {
             recipe.folder_rules.push(FolderRule {
                 path: "SampleApp/saves".to_string(),
-                mode: FolderRuleMode::Passthrough,
+                mode: FolderRuleMode::Passthrough { ask_on_conflict: false },
             });
         }
         let err = validate_recipe(&recipe, &ctx()).unwrap_err();

@@ -10,7 +10,6 @@ description = "PengPort 플랫폼/도구 간 공유 크레이트 (앱 라이브�
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 thiserror = { workspace = true }
 ureq = { workspace = true }
 fastnbt = { workspace = true }

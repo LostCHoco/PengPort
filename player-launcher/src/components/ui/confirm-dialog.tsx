@@ -65,7 +65,6 @@ export function useConfirmDialog() {
         className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
         role="dialog"
         aria-modal="true"
-        onClick={pending.mode === "confirm" ? handleCancel : handleConfirm}
       >
         <div
           className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"

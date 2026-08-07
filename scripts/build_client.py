@@ -82,6 +82,14 @@ def build_tauri() -> Path:
     """Tauri release 빌드 실행 (NSIS installer + 서명 포함). 결과 exe 경로 반환.
     서명 키가 `.secrets/pengport-updater.key` 에 있으면 자동으로 서명 (.sig 생성)."""
     env = os.environ.copy()
+    # sccache 미사용 강제 — release 빌드는 새 의존성이 추가된 직후처럼 미캐시
+    # 컴파일이 한꺼번에 몰릴 때 Windows 전용 레이스(sccache 서버가 동시에 여러
+    # rustc 를 스폰할 때 발생, 업스트림 수년째 미해결 — mozilla/sccache#1098 등)로
+    # "error writing dependencies ... 액세스가 거부되었습니다 (os error 5)" 가
+    # 간헐적으로 터짐 (2026-08 확인, 재현 A/B 테스트로 sccache 가 필요조건임을 검증).
+    # release 는 배포 시점에만 드물게 돌아 캐시 이득 손실이 미미하므로, `pnpm tauri dev`
+    # 개발 루프(캐시 히트가 잦아 sccache 이득이 큼)는 그대로 두고 이 경로만 우회한다.
+    env["RUSTC_WRAPPER"] = ""
     key_path = ROOT / ".secrets" / "pengport-updater.key"
     if key_path.exists():
         env["TAURI_SIGNING_PRIVATE_KEY"] = key_path.read_text(encoding="utf-8").strip()

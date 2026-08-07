@@ -35,11 +35,11 @@ use std::time::{Duration, Instant};
 
 use pengport_shared::actions::{validate_recipe, ActionContext};
 use pengport_shared::library::{
-    ArchiveExtraction, ArtifactVerification, ConfigFileFormat, FileContent, FolderRuleMode,
-    LaunchAction, LibraryStore, OverrideContent, PathOverride, Recipe, RecipeFile,
+    ArchiveExtraction, ArtifactVerification, FileContent, FolderRuleMode, LaunchAction,
+    LibraryStore, OptionalGroup, OverrideContent, PathOverride, Recipe, RecipeFile, RecipeInfo,
     Sha256Verifier, ThirdPartyAppStore,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_opener::OpenerExt;
 
@@ -161,55 +161,6 @@ pub(super) async fn load_library_store() -> Result<LibraryStore, String> {
     .map_err(|e| format!("blocking task panic: {e}"))?
 }
 
-/// [`LibraryEntry`]의 `id` 필드만 봐도 되는 자리용 — `recipe`의 나머지 필드(수천 개
-/// 파일 선언 등)는 파싱하지 않고 건너뛴다(derive 된 struct 는 알려지지 않은 JSON
-/// 필드를 기본적으로 무시하되, serde_json 이 그 값의 구조는 여전히 훑어야 하므로
-/// 완전히 공짜는 아니다 — 그래도 각 필드마다 String/Vec 을 실제로 할당하는 전체
-/// 역직렬화보다는 훨씬 가볍다).
-#[derive(serde::Deserialize)]
-struct RecipeIdOnly {
-    id: String,
-}
-
-#[derive(serde::Deserialize)]
-struct LibraryEntryLocalFieldsOnly {
-    recipe: RecipeIdOnly,
-    #[serde(default)]
-    local_root_override: Option<PathBuf>,
-    #[serde(default)]
-    selected_optional_groups: Option<HashSet<String>>,
-}
-
-#[derive(serde::Deserialize)]
-struct LibraryDataLocalFieldsOnly {
-    #[serde(default)]
-    entries: Vec<LibraryEntryLocalFieldsOnly>,
-}
-
-/// 레시피 하나의 로컬 전용 필드(`local_root_override`, `selected_optional_groups`)만
-/// 조회 — 이 두 필드가 필요한 커맨드 대부분(`library_install_status`,
-/// `library_install_diagnostics`)은 레시피 본문을 이미 인자로 받아서 갖고 있어
-/// [`load_library_store`]로 전체를 다시 역직렬화할 필요가 없다(실측: 큰 레시피가
-/// 하나라도 있으면 전체 재로드가 수십 ms — 이 조회는 그 값 두 개만 있으면 끝).
-async fn load_local_entry_fields(id: String) -> Result<(Option<PathBuf>, Option<HashSet<String>>), String> {
-    let path = library_store_path()?;
-    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
-        if !path.exists() {
-            return Ok((None, None));
-        }
-        let bytes = std::fs::read(&path).map_err(|e| format!("라이브러리 읽기 실패: {e}"))?;
-        let data: LibraryDataLocalFieldsOnly =
-            serde_json::from_slice(&bytes).map_err(|e| format!("라이브러리 파싱 실패: {e}"))?;
-        let entry = data.entries.into_iter().find(|e| e.recipe.id == id);
-        Ok(match entry {
-            Some(e) => (e.local_root_override, e.selected_optional_groups),
-            None => (None, None),
-        })
-    })
-    .await
-    .map_err(|e| format!("blocking task panic: {e}"))?
-}
-
 pub(super) async fn load_third_party_app_store() -> Result<ThirdPartyAppStore, String> {
     let path = third_party_apps_store_path()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -219,12 +170,53 @@ pub(super) async fn load_third_party_app_store() -> Result<ThirdPartyAppStore, S
     .map_err(|e| format!("blocking task panic: {e}"))?
 }
 
-/// 라이브러리 전체 목록 — flat, 그루핑 없음. `local_root_override`는 export 되지 않는
-/// [`Recipe`]만 노출(로컬 전용 필드는 [`library_get_local_root_override`]로 별도 조회).
+/// 라이브러리 그리드가 실제로 필요로 하는 필드만 담은 가벼운 뷰 — `Recipe.archives`/
+/// `Recipe.files`(개별 파일의 `override_content`에 수 MB짜리 리터럴 base64/텍스트
+/// 콘텐츠가 실릴 수 있음)를 뺀다. 카드 렌더링·설치 상태 뱃지·third-party 앱 확인은
+/// 전부 id 기반 커맨드(`library_install_status`/`library_install`/`library_launch` 등,
+/// 백엔드가 디스크에서 직접 [`Recipe`] 전체를 읽음)로 처리되므로 그리드 단계에서
+/// archives/files 내용이 필요 없다. 실제 콘텐츠가 필요한 유일한 자리(편집 다이얼로그를
+/// 열 때)는 [`library_get`]으로 그 레시피 하나만 따로 받는다.
+///
+/// (2026-08, 실사용 리포트로 도입 — `library_list()`가 전체 `Recipe`를 그리드
+/// 렌더링마다 IPC로 왕복시키던 게, base64 리터럴 오버라이드가 있는 레시피에서 라이브러리
+/// 로딩을 눈에 띄게 느리게 만든 원인이었다.)
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeSummary {
+    pub id: String,
+    pub name: String,
+    pub recipe_info: RecipeInfo,
+    pub launch: LaunchAction,
+    pub optional_groups: Vec<OptionalGroup>,
+}
+
+impl From<&Recipe> for RecipeSummary {
+    fn from(r: &Recipe) -> Self {
+        Self {
+            id: r.id.clone(),
+            name: r.name.clone(),
+            recipe_info: r.recipe_info.clone(),
+            launch: r.launch.clone(),
+            optional_groups: r.optional_groups.clone(),
+        }
+    }
+}
+
+/// 라이브러리 전체 목록 — flat, 그루핑 없음. archives/files 콘텐츠를 뺀 가벼운 뷰만
+/// 반환([`RecipeSummary`] 문서 참고). `local_root_override`는 애초에 [`Recipe`]에
+/// 없는 로컬 전용 필드([`library_get_local_root_override`]로 별도 조회).
 #[tauri::command]
-pub async fn library_list() -> Result<Vec<Recipe>, String> {
+pub async fn library_list() -> Result<Vec<RecipeSummary>, String> {
     let store = load_library_store().await?;
-    Ok(store.list().iter().map(|e| e.recipe.clone()).collect())
+    Ok(store.list().iter().map(|e| RecipeSummary::from(&e.recipe)).collect())
+}
+
+/// [`library_list`]가 뺀 실제 콘텐츠(`archives`/`files[].override_content` 등)까지
+/// 포함한 전체 [`Recipe`] 하나를 받는다 — 레시피 편집 다이얼로그를 열 때만 호출.
+#[tauri::command]
+pub async fn library_get(id: String) -> Result<Option<Recipe>, String> {
+    let store = load_library_store().await?;
+    Ok(store.get(&id).map(|e| e.recipe.clone()))
 }
 
 /// 레시피 직접 추가/갱신("직접 등록" 경로 — `.pengz` 파일 임포트가 아닌 경우). 구조 검증까지
@@ -302,24 +294,6 @@ pub async fn library_set_selected_optional_groups(id: String, groups: Vec<String
     .map_err(|e| format!("blocking task panic: {e}"))?
 }
 
-/// 레시피 편집 화면의 "파일에서 불러오기" — 로컬에 이미 갖고 있는 설정 파일(예: 직접
-/// 써오던 option.ini)을 읽어서 `OverrideContent::ConfigPatch.patch`에 채울 JSON 값으로
-/// 통째로 파싱한다. 레시피 실행(install)이 아니라 **레시피 편집(작성) 시점**의 보조
-/// 기능 — 결과는 그대로 저장되면 공유 레시피 데이터의 일부가 된다(로컬 전용
-/// 오버라이드가 아님).
-#[tauri::command]
-pub async fn read_config_file_as_patch(
-    path: String,
-    format: ConfigFileFormat,
-) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("파일 읽기 실패: {e}"))?;
-        super::config_patch::parse_to_json(format, &text)
-    })
-    .await
-    .map_err(|e| format!("blocking task panic: {e}"))?
-}
-
 /// 레시피 편집 화면의 "폴더 불러오기" — 로컬 폴더(예: 직접 압축을 풀어본 결과물, 또는
 /// 이미 설치된 인스턴스 폴더)를 재귀적으로 훑어서 상대경로 전부를 나열한다.
 /// [`Recipe::files`] 화이트리스트를 손으로 수백 개 타이핑하지 않고 채우기 위함 —
@@ -368,6 +342,24 @@ pub async fn compute_file_sha256(path: String) -> Result<String, String> {
             hasher.update(&buf[..n]);
         }
         Ok(hasher.finalize_hex())
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e}"))?
+}
+
+/// 레시피 편집 화면의 "파일에서 불러오기" — 로컬 파일을 통째로 base64로 인코딩해
+/// 넘긴다(프론트가 UTF-8 텍스트로 디코드해 [`OverrideContent::Literal`]의
+/// `FileContent::Text`를 채움 — 바이너리는 리터럴 override 대상이 아님, 위
+/// `FileContent` 문서 참고). 프론트 JS가 파일을 직접 읽어 인코딩하면 수 MB 파일에서도
+/// 거대 문자열 처리 자체가 무겁다(편집 다이얼로그 렌더링 지연의 원인이기도 했음,
+/// 2026-08) — Rust 쪽에서 한 번에 처리해 완성된 문자열만 넘긴다.
+#[tauri::command]
+pub async fn read_file_base64(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let bytes = std::fs::read(&path).map_err(|e| format!("파일 읽기 실패: {e}"))?;
+        Ok(STANDARD.encode(bytes))
     })
     .await
     .map_err(|e| format!("blocking task panic: {e}"))?
@@ -436,15 +428,15 @@ fn hash_file_and_verify(path: &Path, verification: &ArtifactVerification) -> Res
 
 /// 레시피가 로컬에 설치한 폴더를 OS 파일 탐색기로 연다.
 #[tauri::command]
-pub async fn library_open_folder(recipe: Recipe, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn library_open_folder(id: String, app: tauri::AppHandle) -> Result<(), String> {
     let store = load_library_store().await?;
-    let root_override = store
-        .get(&recipe.id)
-        .and_then(|e| e.local_root_override.clone());
+    let entry = store.get(&id).ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    let root_override = entry.local_root_override.clone();
+    let launch = entry.recipe.launch.clone();
 
     let dir = match root_override {
         Some(root) => root,
-        None => resolve_target_root(&recipe.id, &recipe.launch)?,
+        None => resolve_target_root(&id, &launch)?,
     };
     if !dir.is_dir() {
         return Err(format!(
@@ -455,6 +447,58 @@ pub async fn library_open_folder(recipe: Recipe, app: tauri::AppHandle) -> Resul
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| format!("폴더 열기 실패: {e}"))
+}
+
+/// `root` 아래의 실행 파일에서 뜬 프로세스를 찾아 종료 — 설치 데이터 삭제 직전에
+/// 호출한다. Windows 는 실행 중인 exe나 그 프로세스가 연 파일에 배타적 잠금을 걸어서,
+/// 앱이 켜진 채로 지우면 `remove_dir_all`이 access denied(os error 5)로 실패한다
+/// (2026-08 실사용 버그 리포트). `spawn_local_process`가 fire-and-forget이라 PID를
+/// 따로 기억해두지 않으므로, 지금 떠 있는 프로세스를 경로 기준으로 다시 찾아낸다 —
+/// 이 방식은 `SpawnProcess`/`ThirdPartyAppLaunch` 둘 다 대상 실행 파일이 항상
+/// `root` 밑에 있다는 사실만 쓰므로 launch 종류를 안 가린다.
+/// `terminate_processes_under`의 판정만 떼어낸 순수 함수 — 실제 프로세스 목록
+/// 없이도 고정 fixture 경로로 결정론적 테스트 가능("판단 로직은 항상 fixture로
+/// 영구 테스트" 원칙, `terminate_processes_under` 자체는 실제 OS 프로세스에
+/// 의존해 테스트하지 않는다).
+fn exe_under_root(exe: Option<&Path>, root: &Path) -> bool {
+    exe.is_some_and(|exe| exe.starts_with(root))
+}
+
+fn terminate_processes_under(root: &Path) -> Result<(), String> {
+    use sysinfo::{ProcessesToUpdate, System};
+
+    let Ok(root) = root.canonicalize() else {
+        return Ok(()); // 루트 자체가 없으면 지울 것도, 잠글 프로세스도 없음.
+    };
+
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All);
+
+    let mut targets = Vec::new();
+    for (pid, process) in sys.processes() {
+        let exe = process.exe().and_then(|exe| exe.canonicalize().ok());
+        if exe_under_root(exe.as_deref(), &root) {
+            process.kill();
+            targets.push(*pid);
+        }
+    }
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        sys.refresh_processes(ProcessesToUpdate::All);
+        if targets.iter().all(|pid| sys.process(*pid).is_none()) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "실행 중인 앱을 종료하지 못했습니다 — 앱을 직접 닫고 다시 시도해주세요".to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// 설치된 데이터를 삭제 — **라이브러리 항목은 그대로 남긴다**("라이브러리에서
@@ -472,20 +516,18 @@ pub async fn library_open_folder(recipe: Recipe, app: tauri::AppHandle) -> Resul
 /// 임의 폴더라, PengPort 가 자동으로 지워도 되는 데이터인지 알 수 없다.
 #[tauri::command]
 pub async fn library_delete_installed_data(
-    recipe: Recipe,
+    id: String,
     groups: Option<Vec<String>>,
 ) -> Result<(), String> {
     let mut store = load_library_store().await?;
-    if store
-        .get(&recipe.id)
-        .and_then(|e| e.local_root_override.clone())
-        .is_some()
-    {
+    let entry = store.get(&id).ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    if entry.local_root_override.is_some() {
         return Err(
             "로컬 경로 오버라이드가 설정된 항목입니다 — 사용자가 직접 지정한 폴더라 자동 삭제하지 않습니다. 필요하면 직접 삭제하세요."
                 .to_string(),
         );
     }
+    let recipe = entry.recipe.clone();
 
     match groups {
         None => {
@@ -503,6 +545,7 @@ pub async fn library_delete_installed_data(
             tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
                 if let Some(target_root) = &target_root {
                     if target_root.exists() {
+                        terminate_processes_under(target_root)?;
                         std::fs::remove_dir_all(target_root)
                             .map_err(|e| format!("설치 데이터 삭제 실패 ({}): {e}", target_root.display()))?;
                     }
@@ -544,6 +587,7 @@ pub async fn library_delete_installed_data(
             let recipe_for_ancestors = recipe.clone();
 
             tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+                terminate_processes_under(&root)?;
                 for archive in &archives_to_clear {
                     // 매니페스트 있으면 이 그룹이 실제로 쓴 파일만 정밀 삭제(같은 폴더에
                     // 다른 압축이 넣어둔 콘텐츠는 보존), 없으면 통째 삭제 + 조상 마커
@@ -631,23 +675,51 @@ pub enum InstallOutcome {
     /// 안내만 보여줄 수 있게). 이미 적용된 항목까지 되돌리진 않는다 — 다음 설치 때
     /// 마커 기준으로 이어서 진행(크래시 복구와 같은 방식).
     Cancelled,
+    /// `Literal` override 파일 중 선언값은 바뀌었는데, 디스크의 실제 내용이 PengPort가
+    /// 마지막으로 쓴 것과 달라진(=사용자가 그 사이 직접 건드린) 항목이 있음 — 그냥
+    /// 덮어쓰면 그 변경이 사라진다. frontend 가 3선택지 다이얼로그를 띄우고
+    /// [`library_resolve_override_conflicts`]로 각 파일을 해결한 뒤 재시도해야 함.
+    HasOverrideConflicts { conflicts: Vec<OverrideConflict> },
+    /// 압축 해제 대상(전체 허용 + `ask_on_conflict` 폴더) 안에 이름은 같고 내용은
+    /// 다른 파일이 이미 있음 — frontend 가 충돌 다이얼로그를 띄우고
+    /// [`library_resolve_archive_conflicts`]로 해결한 뒤 재시도해야 함.
+    HasArchiveConflicts { archives: Vec<ArchiveConflictGroup> },
+}
+
+/// [`InstallOutcome::HasArchiveConflicts`] 항목 하나 — 압축 하나에서 발견된 충돌
+/// 전부. `archive_hash`는 [`library_resolve_archive_conflicts`]가 어느 압축인지
+/// 식별하는 키([`archive_content_hash`]와 동일).
+#[derive(Debug, Clone, Serialize)]
+pub struct ArchiveConflictGroup {
+    pub archive_hash: String,
+    pub url: String,
+    pub conflicts: Vec<String>,
+}
+
+/// [`InstallOutcome::HasOverrideConflicts`] 항목 하나 — 드리프트가 감지된 파일의
+/// 경로. v1은 경로만 보여준다(내용 미리보기/diff는 범위 밖).
+#[derive(Debug, Clone, Serialize)]
+pub struct OverrideConflict {
+    pub path: String,
 }
 
 #[tauri::command]
-pub async fn library_install(recipe: Recipe, app: tauri::AppHandle) -> Result<InstallOutcome, String> {
-    pengport_shared::validate_service_id(&recipe.id)
-        .map_err(|e| format!("레시피 id 형식 오류 ({:?}): {e}", recipe.id))?;
+pub async fn library_install(id: String, app: tauri::AppHandle) -> Result<InstallOutcome, String> {
+    pengport_shared::validate_service_id(&id).map_err(|e| format!("레시피 id 형식 오류 ({id:?}): {e}"))?;
+
+    let store = load_library_store().await?;
+    let entry = store.get(&id).ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    if entry.local_root_override.is_some() {
+        return Ok(InstallOutcome::UsingLocalOverride);
+    }
+    let recipe = entry.recipe.clone();
+    let selection = entry.selected_optional_groups.clone();
+
     let ctx = ActionContext {
         allow_http: allow_http(),
     };
     validate_recipe(&recipe, &ctx).map_err(|e| e.to_string())?;
 
-    let store = load_library_store().await?;
-    let entry = store.get(&recipe.id);
-    if entry.and_then(|e| e.local_root_override.clone()).is_some() {
-        return Ok(InstallOutcome::UsingLocalOverride);
-    }
-    let selection = entry.and_then(|e| e.selected_optional_groups.clone());
     if !recipe.optional_groups.is_empty() && selection.is_none() {
         return Ok(InstallOutcome::NeedsOptionalGroupSelection);
     }
@@ -655,6 +727,24 @@ pub async fn library_install(recipe: Recipe, app: tauri::AppHandle) -> Result<In
     for app_id in referenced_third_party_app_ids(&recipe) {
         if check_third_party_app_available(&app_id).is_err() {
             return Ok(InstallOutcome::ThirdPartyAppMissing { app_id });
+        }
+    }
+
+    let selected = selection.clone().unwrap_or_default();
+    {
+        let recipe = recipe.clone();
+        let selected = selected.clone();
+        let conflicts = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<OverrideConflict>, String> {
+            let root = resolve_target_root(&recipe.id, &recipe.launch)?;
+            let markers_dir = super::paths::app_root(&recipe.id)
+                .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
+                .join(".pengport-markers");
+            detect_override_conflicts(&recipe, &selected, &root, &markers_dir)
+        })
+        .await
+        .map_err(|e| format!("blocking task panic: {e}"))??;
+        if !conflicts.is_empty() {
+            return Ok(InstallOutcome::HasOverrideConflicts { conflicts });
         }
     }
 
@@ -666,6 +756,132 @@ pub async fn library_install(recipe: Recipe, app: tauri::AppHandle) -> Result<In
         Err(e) if e.contains(INSTALL_CANCELLED_SENTINEL) => Ok(InstallOutcome::Cancelled),
         other => other,
     }
+}
+
+/// [`InstallOutcome::HasArchiveConflicts`]에 담겨온 압축 안 엔트리 하나를 어떻게
+/// 처리할지 — frontend 의 충돌 다이얼로그가 고른 값. [`Serialize`]도 필요한 이유는
+/// [`OverrideConflictResolution`]과 달리 이 값이 `.pengport-tmp-pending/*.resolutions.json`에
+/// 그대로 저장됐다가 재시도 때 다시 읽히기 때문(프론트→백엔드 1회성 입력이 아니라
+/// 디스크에 영속되는 값).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ArchiveEntryResolution {
+    /// 기존 파일을 압축 안 내용으로 덮어씀.
+    Overwrite { path: String },
+    /// 이 엔트리는 추출하지 않고 기존 파일을 그대로 둠.
+    Skip { path: String },
+    /// 기존 파일은 그대로 두고, 압축 안 내용은 [`unique_fs_path`]로 새 이름을 받아
+    /// 같은 폴더에 따로 씀("이름 (2).ext"). "전체 허용" 폴더에서만 의미 있다 —
+    /// 화이트리스트 강제 폴더였다면 이 새 이름은 레시피가 모르는 파일이라 다음
+    /// 정리 때 바로 지워진다(그래서 이 기능 자체가 전체 허용 폴더로 범위 한정됨).
+    Rename { path: String },
+}
+
+/// [`InstallOutcome::HasOverrideConflicts`]에 담겨온 파일 하나를 어떻게 처리할지 —
+/// frontend 의 3선택지 다이얼로그가 고른 값 그대로.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum OverrideConflictResolution {
+    /// 새 레시피 내용으로 덮어씀 — 여기선 아무것도 안 함(다음 `library_install`
+    /// 재시도가 declined 마커도 없고 지문도 안 맞을 리 없으니 그냥 정상 적용됨).
+    /// frontend는 다른 액션과 형태를 맞추려고 `path`를 같이 보내지만(균일한 배열),
+    /// 여기선 실제로 쓰이지 않아 필드 자체를 안 둠(serde가 알 수 없는 JSON 필드는
+    /// 조용히 무시).
+    Overwrite,
+    /// 이번엔 건너뜀 — 지금 선언값(해시) 기준으로 declined 마커를 남겨서, 레시피가
+    /// 또 바뀌기 전까진 다시 안 물어봄.
+    Skip { path: String },
+    /// 디스크의 지금 내용을 이 레시피의 새 선언값으로 채택(로컬 사본만 갱신 —
+    /// 외부에 공유되는 원본 레시피 소스에는 반영 안 됨).
+    AdoptDisk { path: String },
+}
+
+/// [`OverrideConflictResolution::AdoptDisk`] — 디스크에서 읽은 원본 바이트를
+/// `FileContent`로 감싼다. `FileContent`가 텍스트 전용(2026-08 보안 강화로 바이너리
+/// 리터럴 제거 — [`FileContent`] 문서 참고)이라, UTF-8이 아닌 파일은 애초에 리터럴
+/// override로 담을 수 없다 — 그런 파일은 `ArchiveExtraction`으로만 반영 가능하다는
+/// 뜻이라 명확한 에러로 알린다.
+fn adopt_disk_content(disk_bytes: Vec<u8>) -> Result<FileContent, String> {
+    String::from_utf8(disk_bytes)
+        .map(|text| FileContent::Text { content: text })
+        .map_err(|_| {
+            "이 파일은 텍스트가 아니라 리터럴 override로 담을 수 없습니다 \
+             (바이너리 자산은 압축 다운로드로만 설치 가능)"
+                .to_string()
+        })
+}
+
+/// [`InstallOutcome::HasOverrideConflicts`] 확인 후 frontend 가 사용자의 선택을
+/// 반영하는 커맨드 — 처리 후 [`library_install`]을 다시 호출하면 이어서 진행된다
+/// (third-party 앱 설치/선택 그룹 확정과 같은 "해결 후 재시도" 패턴).
+#[tauri::command]
+pub async fn library_resolve_override_conflicts(
+    id: String,
+    resolutions: Vec<OverrideConflictResolution>,
+) -> Result<(), String> {
+    let mut store = load_library_store().await?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let entry = store.get(&id).ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+        let mut recipe = entry.recipe.clone();
+        let root = resolve_target_root(&recipe.id, &recipe.launch)?;
+        let markers_dir = super::paths::app_root(&recipe.id)
+            .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
+            .join(".pengport-markers");
+
+        let mut changed = false;
+        for resolution in resolutions {
+            match resolution {
+                OverrideConflictResolution::Overwrite => {}
+                OverrideConflictResolution::Skip { path } => {
+                    let file = recipe
+                        .files
+                        .iter()
+                        .find(|f| f.path == path)
+                        .ok_or_else(|| format!("레시피에 없는 파일 경로: {path}"))?;
+                    let hash = file_override_hash(file)?;
+                    write_declined_marker(&markers_dir, &hash)?;
+                }
+                OverrideConflictResolution::AdoptDisk { path } => {
+                    let disk_bytes = std::fs::read(root.join(&path))
+                        .map_err(|e| format!("파일 읽기 실패 ({path}): {e}"))?;
+                    let file = recipe
+                        .files
+                        .iter_mut()
+                        .find(|f| f.path == path)
+                        .ok_or_else(|| format!("레시피에 없는 파일 경로: {path}"))?;
+                    let content = adopt_disk_content(disk_bytes)?;
+                    file.override_content = Some(OverrideContent::Literal { content });
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            store.upsert(recipe);
+        }
+        store.save().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e}"))?
+}
+
+/// [`InstallOutcome::HasArchiveConflicts`] 확인 후 frontend 가 사용자의 선택을 그
+/// 압축의 대기 폴더에 저장만 한다(실제 적용은 다음 [`library_install`] 재시도 때
+/// `execute_archive`가 읽어서 반영 — 그때 보존해둔 다운로드도 같이 재사용되므로
+/// 재다운로드가 없다).
+#[tauri::command]
+pub async fn library_resolve_archive_conflicts(
+    id: String,
+    archive_hash: String,
+    resolutions: Vec<ArchiveEntryResolution>,
+) -> Result<(), String> {
+    pengport_shared::validate_service_id(&id).map_err(|e| format!("레시피 id 형식 오류 ({id:?}): {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let pending_dir = archive_pending_conflict_dir(&id)?;
+        write_pending_resolutions(&pending_dir, &archive_hash, &resolutions)
+    })
+    .await
+    .map_err(|e| format!("blocking task panic: {e}"))?
 }
 
 /// [`library_install`]과 같은 원장(마커)을 조회하되 **아무것도 실행하지 않는** 조회
@@ -694,15 +910,19 @@ pub enum InstallStatus {
 }
 
 #[tauri::command]
-pub async fn library_install_status(recipe: Recipe) -> Result<InstallStatus, String> {
-    let (local_root_override, selection) = load_local_entry_fields(recipe.id.clone()).await?;
-    if local_root_override.is_some() {
+pub async fn library_install_status(id: String) -> Result<InstallStatus, String> {
+    let store = load_library_store().await?;
+    let entry = store
+        .get(&id)
+        .ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    if entry.local_root_override.is_some() {
         return Ok(InstallStatus::UsingLocalOverride);
     }
-    if !recipe.optional_groups.is_empty() && selection.is_none() {
+    let recipe = entry.recipe.clone();
+    if !recipe.optional_groups.is_empty() && entry.selected_optional_groups.is_none() {
         return Ok(InstallStatus::NeedsOptionalGroupSelection);
     }
-    let selected = selection.unwrap_or_default();
+    let selected = entry.selected_optional_groups.clone().unwrap_or_default();
 
     let markers_dir = super::paths::app_root(&recipe.id)
         .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
@@ -730,7 +950,7 @@ pub async fn library_install_status(recipe: Recipe) -> Result<InstallStatus, Str
             }
         }
         for file in effective.iter().filter(|f| f.override_content.is_some()) {
-            if !marker_exists(&markers_dir, &file_override_hash(file)?) {
+            if !is_resolved(&markers_dir, &file_override_hash(file)?) {
                 pending += 1;
             }
         }
@@ -829,7 +1049,7 @@ fn build_dir_listing_cache(root: &Path, effective: &[&RecipeFile]) -> DirListing
 ///
 /// 파일 하나하나 `exists()`(개별 syscall)를 부르는 대신 [`DirListingCache`]를 조회만
 /// 한다 — 실제 디스크 접근은 [`build_dir_listing_cache`]가 호출부에서 한 번만 미리
-/// 해둔다(채보 팩처럼 파일이 수천 개인 압축에서 수천 번의 개별 stat 대신 **부모
+/// 해둔다(콘텐츠 팩처럼 파일이 수천 개인 압축에서 수천 번의 개별 stat 대신 **부모
 /// 디렉토리 개수만큼만** 시스템 콜, 여러 압축이 겹치는 범위를 pending 으로 봐도 중복
 /// 없음 — 실측: 콘텐츠 팩 하나가 파일 7000개+ 인데 부모 디렉토리는 수백 개뿐). 캐시
 /// 키가 상대경로라 여기서도 `root`를 합치는 `PathBuf` 할당이 후보 파일마다 필요 없다.
@@ -852,19 +1072,23 @@ fn missing_declared_files(extract_to: &str, effective: &[&RecipeFile], cache: &D
 }
 
 #[tauri::command]
-pub async fn library_install_diagnostics(recipe: Recipe) -> Result<Vec<InstallDiagnostic>, String> {
-    let (local_root_override, selection) = load_local_entry_fields(recipe.id.clone()).await?;
-    if local_root_override.is_some() {
+pub async fn library_install_diagnostics(id: String) -> Result<Vec<InstallDiagnostic>, String> {
+    let store = load_library_store().await?;
+    let entry = store
+        .get(&id)
+        .ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    if entry.local_root_override.is_some() {
         return Ok(Vec::new());
     }
+    let recipe = entry.recipe.clone();
     // `library_install`(실제 설치)과 같은 조건으로 같은 결론을 내야 한다 — 여기서
     // `selection.unwrap_or_default()`로 그냥 넘어가면 "아직 한 번도 선택 확인 안 함"과
     // "확인했고 전부 해제함"을 구분 못 해, 방금 옵션이 생긴 압축이 실제로는 선택 창이
     // 뜰 텐데도 "범위 밖이라 마커만 없다"는 잘못된 진단으로 보이는 사고가 난다.
-    if !recipe.optional_groups.is_empty() && selection.is_none() {
+    if !recipe.optional_groups.is_empty() && entry.selected_optional_groups.is_none() {
         return Ok(vec![InstallDiagnostic::NeedsOptionalGroupSelection]);
     }
-    let selected = selection.unwrap_or_default();
+    let selected = entry.selected_optional_groups.clone().unwrap_or_default();
 
     let markers_dir = super::paths::app_root(&recipe.id)
         .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
@@ -919,7 +1143,7 @@ pub async fn library_install_diagnostics(recipe: Recipe) -> Result<Vec<InstallDi
             .copied()
             .filter(|f| f.override_content.is_some())
         {
-            if !marker_exists(&markers_dir, &file_override_hash(file)?) {
+            if !is_resolved(&markers_dir, &file_override_hash(file)?) {
                 out.push(InstallDiagnostic::FilePending { path: file.path.clone() });
             }
         }
@@ -939,18 +1163,18 @@ pub enum LaunchOutcome {
 }
 
 #[tauri::command]
-pub async fn library_launch(recipe: Recipe, app: tauri::AppHandle) -> Result<LaunchOutcome, String> {
-    pengport_shared::validate_service_id(&recipe.id)
-        .map_err(|e| format!("레시피 id 형식 오류 ({:?}): {e}", recipe.id))?;
+pub async fn library_launch(id: String, app: tauri::AppHandle) -> Result<LaunchOutcome, String> {
+    pengport_shared::validate_service_id(&id).map_err(|e| format!("레시피 id 형식 오류 ({id:?}): {e}"))?;
+
+    let store = load_library_store().await?;
+    let entry = store.get(&id).ok_or_else(|| format!("알 수 없는 레시피: {id}"))?;
+    let recipe = entry.recipe.clone();
+    let root_override = entry.local_root_override.clone();
+
     let ctx = ActionContext {
         allow_http: allow_http(),
     };
     validate_recipe(&recipe, &ctx).map_err(|e| e.to_string())?;
-
-    let store = load_library_store().await?;
-    let root_override = store
-        .get(&recipe.id)
-        .and_then(|e| e.local_root_override.clone());
 
     match &recipe.launch {
         LaunchAction::SpawnProcess {
@@ -1425,8 +1649,13 @@ async fn reconcile_install(
 
     // 이전 설치 시도가 중간에 죽었을 때 남을 수 있는 임시 다운로드 파일 정리 — 이
     // 폴더는 PengPort 가 이 레시피 전용으로만 쓰는 스크래치 공간이라 통째로 지워도 안전.
+    // `.pengport-tmp-pending`(압축 해제 충돌 확인 대기 중인 보존 다운로드)은 여기서
+    // 안 건드림 — 사용자가 아직 답 안 한 충돌이 있으면 재다운로드 없이 이어가야 하므로.
     if let Ok(tmp_dir) = archive_tmp_dir(&recipe.id) {
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+    if let Ok(pending_dir) = archive_pending_conflict_dir(&recipe.id) {
+        prune_orphaned_pending_conflicts(recipe, &pending_dir);
     }
 
     let files_with_override: Vec<&RecipeFile> = effective_files(recipe, selected)
@@ -1492,11 +1721,17 @@ async fn reconcile_install(
         let selected_clone = selected.clone();
         let app_clone = app.clone();
         let cancel_flag_clone = cancel_flag.clone();
-        let written = tauri::async_runtime::spawn_blocking(move || {
+        let result = tauri::async_runtime::spawn_blocking(move || {
             execute_archive(&recipe_clone, &archive_clone, &selected_clone, &app_clone, &cancel_flag_clone)
         })
         .await
         .map_err(|e| format!("blocking task panic: {e}"))??;
+        let written = match result {
+            ArchiveExecutionResult::Written(written) => written,
+            ArchiveExecutionResult::ConflictsPending(group) => {
+                return Ok(InstallOutcome::HasArchiveConflicts { archives: vec![group] });
+            }
+        };
         write_marker(&markers_dir, &hash)?;
         if archive.optional_group.is_some() {
             write_manifest(&markers_dir, &hash, &written)?;
@@ -1522,7 +1757,7 @@ async fn reconcile_install(
     for file in files_with_override {
         let hash = file_override_hash(file)?;
         item_index += 1;
-        if marker_exists(&markers_dir, &hash) {
+        if is_resolved(&markers_dir, &hash) {
             continue;
         }
         check_cancelled(&cancel_flag)?;
@@ -1580,6 +1815,60 @@ fn remove_marker(markers_dir: &Path, hash: &str) -> Result<(), String> {
         std::fs::remove_file(&path).map_err(|e| format!("설치 마커 삭제 실패: {e}"))?;
     }
     Ok(())
+}
+
+fn declined_marker_path(markers_dir: &Path, hash: &str) -> PathBuf {
+    markers_dir.join(format!("{hash}.declined"))
+}
+
+/// [`library_resolve_override_conflicts`]에서 사용자가 "업데이트하지 않기"를 고른
+/// 파일에 기록 — 이 정확한 선언값(해시)에 대해선 다음 설치/업데이트에서 다시
+/// 안 물어보고 조용히 건너뛴다. 레시피가 또 바뀌어 해시가 달라지면 새 해시는
+/// declined 마커가 없으니 자연히 다시 판정 대상이 된다.
+fn write_declined_marker(markers_dir: &Path, hash: &str) -> Result<(), String> {
+    std::fs::create_dir_all(markers_dir).map_err(|e| format!("건너뜀 마커 폴더 생성 실패: {e}"))?;
+    std::fs::write(declined_marker_path(markers_dir, hash), "")
+        .map_err(|e| format!("건너뜀 마커 기록 실패: {e}"))
+}
+
+/// "이 해시는 더 이상 안 물어봐도/재적용 안 해도 됨" — 실제로 적용됐거나(`.done`),
+/// 사용자가 명시적으로 건너뛰기를 골랐거나(`.declined`) 둘 중 하나. pending 판정과
+/// [`detect_override_conflicts`]가 공유하는 단일 판정점.
+fn is_resolved(markers_dir: &Path, hash: &str) -> bool {
+    marker_exists(markers_dir, hash) || declined_marker_path(markers_dir, hash).exists()
+}
+
+fn path_fingerprint_dir(markers_dir: &Path) -> PathBuf {
+    markers_dir.join("paths")
+}
+
+fn path_fingerprint_marker(markers_dir: &Path, file_path: &str) -> PathBuf {
+    path_fingerprint_dir(markers_dir).join(format!("{}.content-sha256", sha256_hex(file_path.as_bytes())))
+}
+
+/// [`execute_override`]가 파일을 실제로 쓸 때마다 그 원본 바이트의 SHA256을
+/// 기록해두는 "적용 지문" — "PengPort가 마지막으로 이 경로에 실제로 쓴 내용".
+/// `file_override_hash`(선언값 자체의 해시, 빈 `.done` 마커)와는 별개다 — 그건
+/// "이 선언값을 적용한 적 있는가"만 알고 디스크의 지금 상태는 전혀 모른다. 드리프트
+/// 판정([`detect_override_conflicts`])은 이 지문과 지금 디스크 파일의 해시를
+/// 비교해서 한다.
+fn write_path_fingerprint(markers_dir: &Path, file_path: &str, content_bytes: &[u8]) -> Result<(), String> {
+    let dir = path_fingerprint_dir(markers_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("적용 지문 폴더 생성 실패: {e}"))?;
+    std::fs::write(path_fingerprint_marker(markers_dir, file_path), sha256_hex(content_bytes))
+        .map_err(|e| format!("적용 지문 기록 실패: {e}"))
+}
+
+/// 지문이 없으면(이 path를 이 메커니즘으로 관리한 적 없음 — 첫 설치 포함) `None`.
+fn read_path_fingerprint(markers_dir: &Path, file_path: &str) -> Option<String> {
+    std::fs::read_to_string(path_fingerprint_marker(markers_dir, file_path)).ok()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------
@@ -1656,7 +1945,7 @@ fn remove_grouped_archive_content(
 /// 재설치 때도 자동 복원이 안 된다. 마커를 지워두면 다음 설치/업데이트 때 그 조상
 /// 압축이 다시 실행돼 자기 몫을 복원한다.
 ///
-/// **형제 그룹(NSong 등)까지 번지지 않는다** — 정확히 "조상"(같거나 상위 폴더) 관계만
+/// **형제 그룹(GroupB 등)까지 번지지 않는다** — 정확히 "조상"(같거나 상위 폴더) 관계만
 /// 보고, 다른 그룹의 dest_dir는 서로 조상 관계가 아니므로 영향받지 않는다. `raw_filename`
 /// 압축도 대상에 포함 — 단일 파일이 지워진 폴더 안에 있었을 수 있어 같은 논리로 복원
 /// 대상이다.
@@ -1780,7 +2069,7 @@ fn check_third_party_app_available(app_id: &str) -> Result<(), String> {
 /// 하위트리는 건드리지 않음).
 ///
 /// `optional_group`이 있는(콘텐츠 팩) 압축은 **폴더 자체가 화이트리스트** — 개별
-/// 파일을 `RecipeFile`로 일일이 선언하지 않는다(채보 팩 하나에 수천 개 파일이
+/// 파일을 `RecipeFile`로 일일이 선언하지 않는다(콘텐츠 팩 하나에 수천 개 파일이
 /// 들어있어 파일 단위 화이트리스트가 실질적으로 불가능한 규모). `extract_to`는 이
 /// 압축의 전용 리프 경로를 가리킨다(예: `SampleApp/Content`) — 압축 내부의 최상위
 /// 폴더(보통 자기 이름과 같음, 예: `Content/file.bin`)는 [`extract_archive_file`]이
@@ -1800,84 +2089,143 @@ fn check_third_party_app_available(app_id: &str) -> Result<(), String> {
 /// 자원 고갈 위험이 있었다, `docs/design/INSTALL_PROGRESS.md` 참고). 압축 해제도 그
 /// 임시 파일을 `Read + Seek` 로 그대로 열어 처리 — 압축 해제 라이브러리(zip/7z) 자체가
 /// 메모리에 더 담을 수 있는지는 이 함수의 책임 범위 밖.
+/// [`execute_archive`]의 결과 — 정상적으로 다 썼는지, 아니면 압축 해제 충돌이
+/// 발견돼 사용자 확인이 필요해서 이번 시도를 멈췄는지.
+enum ArchiveExecutionResult {
+    Written(Vec<String>),
+    ConflictsPending(ArchiveConflictGroup),
+}
+
+fn resolution_path(r: &ArchiveEntryResolution) -> &str {
+    match r {
+        ArchiveEntryResolution::Overwrite { path } => path,
+        ArchiveEntryResolution::Skip { path } => path,
+        ArchiveEntryResolution::Rename { path } => path,
+    }
+}
+
 fn execute_archive(
     recipe: &Recipe,
     archive: &ArchiveExtraction,
     selected: &HashSet<String>,
     app: &tauri::AppHandle,
     cancel_flag: &AtomicBool,
-) -> Result<Vec<String>, String> {
-    let tmp_dir = archive_tmp_dir(&recipe.id)?;
-    let download_throttle = Throttle::new(Duration::from_millis(150));
-    let recipe_id = recipe.id.clone();
-    let label = archive.url.clone();
-    // 항상 먼저 직접 받아본다 — 실제로 압축/파일이 아니라 사람이 눌러야 하는 페이지가
-    // 돌아온 경우에만(`DownloadOutcome::InteractivePage`) 브라우저로 폴백. 레시피
-    // 작성자가 "이건 직링크가 아니다"를 미리 선언할 필요가 없다(예전엔
-    // `ArchiveExtraction.browser_assisted` 플래그로 선언해야 했으나, 시도해보면 바로
-    // 알 수 있는 사실이라 폐기 — 자세한 경위는 shared 크레이트 쪽 옛 필드 doc 이력
-    // 참고 대신 이 함수가 SSOT).
-    let (tmp_path, used_browser_assisted) = match download_and_verify_to_file(
-        &archive.url,
-        &archive.verification,
-        "설치 아티팩트",
-        Duration::from_secs(1800),
-        &tmp_dir,
-        Some(cancel_flag),
-        |downloaded, total_bytes| {
-            if download_throttle.allow() || total_bytes.is_some_and(|t| downloaded >= t) {
-                let _ = app.emit(
-                    "install:download-progress",
-                    serde_json::json!({
-                        "recipeId": recipe_id, "label": label,
-                        "downloadedBytes": downloaded, "totalBytes": total_bytes
-                    }),
-                );
+) -> Result<ArchiveExecutionResult, String> {
+    let hash = archive_content_hash(archive)?;
+    let pending_dir = archive_pending_conflict_dir(&recipe.id)?;
+    let pending_path = pending_download_path(&pending_dir, &hash);
+
+    // 이전 시도가 압축 해제 충돌 확인 대기 중에 남겨둔 검증된 다운로드가 있으면
+    // 재사용(재검증 후) — 대용량 압축을 다시 받지 않기 위함. 검증 실패(손상/유실)면
+    // 지우고 평소대로 새로 받는다.
+    let tmp_path: PathBuf =
+        if pending_path.exists() && hash_file_and_verify(&pending_path, &archive.verification).is_ok() {
+            pending_path.clone()
+        } else {
+            if pending_path.exists() {
+                let _ = std::fs::remove_file(&pending_path);
             }
-        },
-    )? {
-        DownloadOutcome::Downloaded(path) => (path, false),
-        DownloadOutcome::InteractivePage => {
-            let path = obtain_via_browser_assisted_download(recipe, archive, app, cancel_flag, &tmp_dir)?;
-            (path, true)
-        }
-    };
-    let _tmp_guard = TempFileGuard(tmp_path.clone());
+            let tmp_dir = archive_tmp_dir(&recipe.id)?;
+            let download_throttle = Throttle::new(Duration::from_millis(150));
+            let recipe_id = recipe.id.clone();
+            let label = archive.url.clone();
+            // 항상 먼저 직접 받아본다 — 실제로 압축/파일이 아니라 사람이 눌러야 하는
+            // 페이지가 돌아온 경우에만(`DownloadOutcome::InteractivePage`) 브라우저로
+            // 폴백. 레시피 작성자가 "이건 직링크가 아니다"를 미리 선언할 필요가 없다
+            // (예전엔 `ArchiveExtraction.browser_assisted` 플래그로 선언해야 했으나,
+            // 시도해보면 바로 알 수 있는 사실이라 폐기 — 자세한 경위는 shared 크레이트
+            // 쪽 옛 필드 doc 이력 참고 대신 이 함수가 SSOT).
+            match download_and_verify_to_file(
+                &archive.url,
+                &archive.verification,
+                "설치 아티팩트",
+                Duration::from_secs(1800),
+                &tmp_dir,
+                Some(cancel_flag),
+                |downloaded, total_bytes| {
+                    if download_throttle.allow() || total_bytes.is_some_and(|t| downloaded >= t) {
+                        let _ = app.emit(
+                            "install:download-progress",
+                            serde_json::json!({
+                                "recipeId": recipe_id, "label": label,
+                                "downloadedBytes": downloaded, "totalBytes": total_bytes
+                            }),
+                        );
+                    }
+                },
+            )? {
+                DownloadOutcome::Downloaded(path) => path,
+                DownloadOutcome::InteractivePage => {
+                    obtain_via_browser_assisted_download(recipe, archive, app, cancel_flag, &tmp_dir)?
+                }
+            }
+        };
 
     let root = resolve_target_root(&recipe.id, &recipe.launch)?;
     let dest_dir = merge_dest(&root, &archive.extract_to);
-
     let raw_filename = archive.raw_filename.as_deref();
-    let format_hint = extract_format_hint(&archive.url, &tmp_path, used_browser_assisted);
+    // strip_root(최상위 컴포넌트 하나 벗기기)는 그룹 전용 콘텐츠 압축에서만, "압축
+    // 내부가 통째로 자기 소유 폴더 하나로 감싸져 있다"(예: GroupA.7z 안이 전부
+    // `GroupA/...`)는 전제에서만 옳다 — `path_overrides`를 선언한 압축은 그 전제 자체가
+    // 다르다(파일들이 압축 최상위에 개별로 있고, 각 파일을 어디로 보낼지 직접
+    // 지정하는 방식이라 감싸는 폴더가 없음). 이 경우 strip_root=true 를 그대로 쓰면
+    // 최상위 파일 엔트리(경로 부품이 하나뿐)가 "감싸는 폴더 이름 자체를 가리키는
+    // 엔트리"로 오인돼 `safe_join_archive_entry`가 통째로 건너뛰어버린다 — 실제로 이
+    // 버그로 SampleApp 레시피의 개별 파일 교체용 그룹 압축들이 압축을 열어도 아무 것도
+    // 추출하지 못하고 있었다(2026-08 확인). `path_overrides`가 있으면 배치를 전적으로
+    // 그게 담당하므로 strip_root 없이 원래 경로 그대로 추출한다.
+    let strip_root = archive.optional_group.is_some() && archive.path_overrides.is_empty();
+
+    // 이미 사용자가 해결한 충돌이 있으면(재시도) 그대로 적용 — 없으면 새로 스캔해서
+    // 판정한다. 충돌이 있는데 아직 해결 안 됐으면 다운로드를 보존해두고 여기서 멈춘다.
+    let resolutions: HashMap<String, ArchiveEntryResolution> = match read_pending_resolutions(&pending_dir, &hash) {
+        Some(list) => list.into_iter().map(|r| (resolution_path(&r).to_string(), r)).collect(),
+        None => {
+            let scanned = scan_archive_entries(&tmp_path, &dest_dir, strip_root, raw_filename)?;
+            let scanned = apply_path_overrides_to_scan(scanned, &root, &archive.path_overrides);
+            let conflicts = detect_archive_conflicts(&scanned, recipe, &root);
+            if !conflicts.is_empty() {
+                if tmp_path != pending_path {
+                    std::fs::create_dir_all(&pending_dir).map_err(|e| format!("대기 폴더 생성 실패: {e}"))?;
+                    if std::fs::rename(&tmp_path, &pending_path).is_err() {
+                        std::fs::copy(&tmp_path, &pending_path).map_err(|e| format!("보존 다운로드 복사 실패: {e}"))?;
+                        let _ = std::fs::remove_file(&tmp_path);
+                    }
+                }
+                return Ok(ArchiveExecutionResult::ConflictsPending(ArchiveConflictGroup {
+                    archive_hash: hash,
+                    url: archive.url.clone(),
+                    conflicts,
+                }));
+            }
+            HashMap::new()
+        }
+    };
+
+    let _tmp_guard = TempFileGuard(tmp_path.clone());
 
     if archive.optional_group.is_some() {
         // 폴더 자체가 화이트리스트 — wipe 하지 않고 병합만. 그룹을 완전히 끄는 삭제는
         // `reconcile_install`의 별도(명시적) 경로가 담당(위 doc comment 참고). 반환하는
         // 상대경로 목록은 호출자가 매니페스트로 기록해서, 나중에 이 그룹만 정밀 삭제할
         // 때 다른 압축이 같은 폴더에 넣어둔 콘텐츠를 안 건드리게 한다.
-        //
-        // strip_root(최상위 컴포넌트 하나 벗기기)는 "압축 내부가 통째로 자기 소유
-        // 폴더 하나로 감싸져 있다"(예: ESong.7z 안이 전부 `ESong/...`) 는 전제에서만
-        // 옳다 — `path_overrides`를 선언한 압축은 그 전제 자체가 다르다(파일들이
-        // 압축 최상위에 개별로 있고, 각 파일을 어디로 보낼지 직접 지정하는 방식이라
-        // 감싸는 폴더가 없음). 이 경우 strip_root=true 를 그대로 쓰면 최상위 파일
-        // 엔트리(경로 부품이 하나뿐)가 "감싸는 폴더 이름 자체를 가리키는 엔트리"로
-        // 오인돼 `safe_join_archive_entry`가 통째로 건너뛰어버린다 — 실제로 이 버그로
-        // DPJAM 레시피의 개별 파일 교체용 그룹 압축들이 압축을 열어도 아무 것도
-        // 추출하지 못하고 있었다(2026-08 확인). `path_overrides`가 있으면 배치를
-        // 전적으로 그게 담당하므로 strip_root 없이 원래 경로 그대로 추출한다.
-        let strip_root = archive.path_overrides.is_empty();
-        let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, format_hint: &format_hint };
-        let written =
-            extract_archive_file(&tmp_path, &archive.url, &dest_dir, strip_root, raw_filename, ctx, Some(cancel_flag))?;
-        return apply_path_overrides(&written, &dest_dir, &root, &archive.path_overrides);
+        let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, resolutions: &resolutions };
+        let written = extract_archive_file(
+            &tmp_path, &archive.url, &dest_dir, strip_root, raw_filename, ctx, Some(cancel_flag),
+        )?;
+        let result = apply_path_overrides(&written, &dest_dir, &root, &archive.path_overrides)?;
+        remove_pending_conflict_files(&pending_dir, &hash);
+        return Ok(ArchiveExecutionResult::Written(result));
     }
 
-    let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, format_hint: &format_hint };
-    let written = extract_archive_file(&tmp_path, &archive.url, &dest_dir, false, raw_filename, ctx, Some(cancel_flag))?;
+    let ctx = ExtractProgressContext { app, recipe_id: &recipe.id, resolutions: &resolutions };
+    let written = extract_archive_file(
+        &tmp_path, &archive.url, &dest_dir, false, raw_filename, ctx, Some(cancel_flag),
+    )?;
+    remove_pending_conflict_files(&pending_dir, &hash);
 
     if !archive_owns_dest_dir_whitelist(archive) {
-        return Ok(written);
+        return Ok(ArchiveExecutionResult::Written(written));
     }
 
     let written = apply_path_overrides(&written, &dest_dir, &root, &archive.path_overrides)?;
@@ -1890,7 +2238,7 @@ fn execute_archive(
     exclude.extend(pengport_internal_dirs(&recipe.id));
     exclude.extend(folder_rule_dest_dirs(recipe, &root));
     prune_disallowed_files(&dest_dir, &archive.extract_to, &allowed, &exclude)?;
-    Ok(written)
+    Ok(ArchiveExecutionResult::Written(written))
 }
 
 /// `recipe.folder_rules`에 선언된 모든 폴더의 절대 경로 — 모드나 재적용 시점과
@@ -2031,22 +2379,36 @@ fn apply_path_overrides(
 /// `rel`에 적용할 `path_overrides` 항목을 찾아 새 목적지 경로를 계산한다. 정확히
 /// 일치가 항상 먼저(배열 순서와 무관) — 폴더 규칙 안의 파일 하나만 예외로 다른 곳에
 /// 보내고 싶을 때, 그 예외가 폴더 규칙보다 뒤에 선언돼 있어도 이기게 하기 위함.
+///
+/// 폴더 단위 매칭(`from`이 파일 하나와 정확히 안 겹칠 때)은 rsync/cp의 트레일링
+/// 슬래시 관례를 그대로 따른다(2026-08, 사용자 확인): `"GroupA/"`(슬래시 있음)는
+/// 내용만 옮기고 `GroupA` 폴더 이름 자체는 사라짐(strip), `"GroupA"`(슬래시 없음)는
+/// 폴더 이름을 유지한 채 `to` 밑에 통째로 얹는다(`to/GroupA/...`) — "폴더 이름을
+/// 남길지"를 새 필드 없이 슬래시 유무 하나로 표현.
+///
 /// 어느 것에도 안 걸리면 `None`(호출자가 원래 경로 그대로 둠).
 fn resolve_path_override_target(rel: &str, overrides: &[PathOverride]) -> Option<String> {
     if let Some(exact) = overrides.iter().find(|o| o.from == rel) {
         return Some(exact.to.clone());
     }
     overrides.iter().find_map(|o| {
+        let strip = o.from.ends_with('/');
         let from = o.from.trim_end_matches('/');
         if from.is_empty() {
             return None; // 빈 from(전체 매치)은 지원 안 함 — extract_to 로 이미 표현 가능.
         }
         let suffix = rel.strip_prefix(from)?.strip_prefix('/')?;
-        Some(if o.to.is_empty() {
-            suffix.to_string()
+        if strip {
+            Some(if o.to.is_empty() {
+                suffix.to_string()
+            } else {
+                format!("{}/{suffix}", o.to)
+            })
         } else {
-            format!("{}/{suffix}", o.to)
-        })
+            // 폴더 이름(`from`) 유지 — `rel`이 이미 `{from}/{suffix}` 그대로라 통째로
+            // `to` 밑에 다시 둔다.
+            Some(if o.to.is_empty() { rel.to_string() } else { format!("{}/{rel}", o.to) })
+        }
     })
 }
 
@@ -2064,16 +2426,32 @@ fn pengport_internal_dirs(recipe_id: &str) -> Vec<PathBuf> {
     }
 }
 
-/// `extract_archive_file`의 형식 판별(zip/7z) 대상 문자열. `used_browser_assisted`는
-/// `execute_archive`가 `download_and_verify_to_file`의 결과를 보고 넘기는 값(레시피에
-/// 선언된 정적 값이 아님) — false면 `url`(보통 `.zip`/`.7z`로 끝남), true면 `url`이
-/// 다운로드 페이지 링크라 확장자가 없으므로 실제로 받은 파일(`tmp_path`, 확장자
-/// 보존됨)의 이름을 쓴다.
-fn extract_format_hint(url: &str, tmp_path: &Path, used_browser_assisted: bool) -> String {
-    if used_browser_assisted {
-        tmp_path.to_string_lossy().into_owned()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Zip,
+    SevenZ,
+}
+
+/// `extract_archive_file`/`scan_archive_entries`의 형식 판별 — 예전엔 URL 확장자(직접
+/// 다운로드) 또는 브라우저로 받은 실제 파일명(확장자 보존)에 의존했는데, 압축 해제
+/// 충돌로 다운로드를 보존했다가 나중에 재사용할 때는 파일명을 그대로 못 지킨다
+/// (`{hash}.download`로 저장 — 원래 이름/URL과 무관). 이름 대신 파일 내용의 매직
+/// 바이트로 직접 판별하면 이런 이름 유실과 무관하게 항상 정확하고, 애초에
+/// "직접 다운로드 vs 브라우저 보조"라는 경로 분기 자체가 판별에 필요 없어진다.
+fn sniff_archive_kind(path: &Path) -> Result<ArchiveKind, String> {
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", path.display()))?;
+    let mut magic = [0u8; 6];
+    let n = file
+        .read(&mut magic)
+        .map_err(|e| format!("임시 파일 읽기 실패 ({}): {e}", path.display()))?;
+    if n >= 4 && magic[..4] == [0x50, 0x4B, 0x03, 0x04] {
+        Ok(ArchiveKind::Zip)
+    } else if n >= 6 && magic == [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C] {
+        Ok(ArchiveKind::SevenZ)
     } else {
-        url.to_string()
+        Err("지원하지 않는 아카이브 형식(.zip/.7z 만 지원)".to_string())
     }
 }
 
@@ -2207,15 +2585,111 @@ fn archive_tmp_dir(recipe_id: &str) -> Result<PathBuf, String> {
         .join(".pengport-tmp"))
 }
 
+/// 압축 해제 충돌 확인 대기 중인 **검증된** 다운로드를 보관 — `archive_tmp_dir`(재조정
+/// 시작할 때마다 통째로 wipe)와 별개로, 사용자가 충돌 다이얼로그에 답할 때까지
+/// 살아남는다. 대용량 압축(수백MB~수GB)을 재다운로드하지 않기 위함. 파일명은
+/// [`archive_content_hash`] 그대로 — 레시피가 이 압축 선언을 바꾸면 해시가 달라져
+/// 자동으로 "다른 파일" 취급되므로 잘못된 재사용 위험이 없다.
+fn archive_pending_conflict_dir(recipe_id: &str) -> Result<PathBuf, String> {
+    Ok(super::paths::app_root(recipe_id)
+        .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
+        .join(".pengport-tmp-pending"))
+}
+
+fn pending_download_path(pending_dir: &Path, archive_hash: &str) -> PathBuf {
+    pending_dir.join(format!("{archive_hash}.download"))
+}
+
+fn pending_resolutions_path(pending_dir: &Path, archive_hash: &str) -> PathBuf {
+    pending_dir.join(format!("{archive_hash}.resolutions.json"))
+}
+
+fn write_pending_resolutions(
+    pending_dir: &Path,
+    archive_hash: &str,
+    resolutions: &[ArchiveEntryResolution],
+) -> Result<(), String> {
+    std::fs::create_dir_all(pending_dir).map_err(|e| format!("대기 폴더 생성 실패: {e}"))?;
+    let json = serde_json::to_vec(resolutions).map_err(|e| format!("직렬화 실패: {e}"))?;
+    std::fs::write(pending_resolutions_path(pending_dir, archive_hash), json)
+        .map_err(|e| format!("해결 내역 기록 실패: {e}"))
+}
+
+/// 해결 내역이 없거나 손상됐으면 `None` — 호출자가 "아직 해결 안 됨"과 동일하게
+/// 취급(충돌이 다시 감지되면 다이얼로그를 또 띄움).
+fn read_pending_resolutions(pending_dir: &Path, archive_hash: &str) -> Option<Vec<ArchiveEntryResolution>> {
+    let bytes = std::fs::read(pending_resolutions_path(pending_dir, archive_hash)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn remove_pending_conflict_files(pending_dir: &Path, archive_hash: &str) {
+    let _ = std::fs::remove_file(pending_download_path(pending_dir, archive_hash));
+    let _ = std::fs::remove_file(pending_resolutions_path(pending_dir, archive_hash));
+}
+
+/// 레시피 편집으로 압축 선언이 바뀌거나 없어지면 옛 보존 다운로드가 고아로 남는다 —
+/// 지금 `recipe.archives`의 어떤 해시와도 안 맞는 건 정리한다(대용량 파일이 무한정
+/// 쌓이는 걸 방지). `reconcile_install` 시작 시 `.pengport-tmp` wipe와 같은 자리에서
+/// 호출된다.
+fn prune_orphaned_pending_conflicts(recipe: &Recipe, pending_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(pending_dir) else { return };
+    let current_hashes: HashSet<String> =
+        recipe.archives.iter().filter_map(|a| archive_content_hash(a).ok()).collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let hash = name.split('.').next().unwrap_or("");
+        if !hash.is_empty() && !current_hashes.contains(hash) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `library_install`이 실제로 적용을 시작하기 전에 부르는 pre-flight 판정 —
+/// `Literal` override가 있고 아직 pending(`!is_resolved`)인 파일 중, 디스크의 지금
+/// 내용이 [`write_path_fingerprint`]가 기록해둔 "마지막으로 실제로 쓴 내용"과 다른
+/// 것만 충돌로 본다. 지문이 없으면(이 path를 처음 다루는 것 — 첫 설치 포함) 또는
+/// 디스크에 파일 자체가 없으면(지울 것도 없음) 비교 대상이 없으니 충돌 아님.
+fn detect_override_conflicts(
+    recipe: &Recipe,
+    selected: &HashSet<String>,
+    root: &Path,
+    markers_dir: &Path,
+) -> Result<Vec<OverrideConflict>, String> {
+    let mut conflicts = Vec::new();
+    for file in effective_files(recipe, selected) {
+        let Some(OverrideContent::Literal { .. }) = &file.override_content else {
+            continue;
+        };
+        let hash = file_override_hash(file)?;
+        if is_resolved(markers_dir, &hash) {
+            continue;
+        }
+        let Some(fingerprint) = read_path_fingerprint(markers_dir, &file.path) else {
+            continue;
+        };
+        let Ok(disk_bytes) = std::fs::read(root.join(&file.path)) else {
+            continue;
+        };
+        if sha256_hex(&disk_bytes) != fingerprint {
+            conflicts.push(OverrideConflict { path: file.path.clone() });
+        }
+    }
+    Ok(conflicts)
+}
+
 fn execute_override(recipe_id: &str, launch: &LaunchAction, file: &RecipeFile) -> Result<(), String> {
     let Some(content) = &file.override_content else {
         return Ok(());
     };
     let root = resolve_target_root(recipe_id, launch)?;
+    let markers_dir = super::paths::app_root(recipe_id)
+        .ok_or_else(|| "app_root 미정 (%LOCALAPPDATA% 환경변수 없음)".to_string())?
+        .join(".pengport-markers");
     match content {
-        OverrideContent::Literal { content } => write_file_content(&root, &file.path, content),
-        OverrideContent::ConfigPatch { format, patch } => {
-            super::config_patch::apply_config_patch(*format, &root.join(&file.path), patch)
+        OverrideContent::Literal { content } => {
+            let written = write_file_content(&root, &file.path, content)?;
+            write_path_fingerprint(&markers_dir, &file.path, &written)
         }
     }
 }
@@ -2229,25 +2703,20 @@ fn merge_dest(root: &Path, sub: &str) -> PathBuf {
     }
 }
 
-fn write_file_content(root: &Path, rel_path: &str, content: &FileContent) -> Result<(), String> {
+/// 성공하면 실제로 쓴 원본 바이트를 그대로 반환 — 호출자([`execute_override`])가
+/// 그걸로 적용 지문(`write_path_fingerprint`)을 남긴다(디코딩 로직을 두 번 안
+/// 만들려고 여기서 계산한 bytes를 그대로 돌려줌).
+fn write_file_content(root: &Path, rel_path: &str, content: &FileContent) -> Result<Vec<u8>, String> {
     let full = root.join(rel_path);
     if let Some(parent) = full.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("폴더 생성 실패 ({}): {e}", parent.display()))?;
     }
-    match content {
-        FileContent::Text { content } => std::fs::write(&full, content.as_bytes())
-            .map_err(|e| format!("파일 쓰기 실패 ({}): {e}", full.display())),
-        FileContent::Base64 { data } => {
-            use base64::engine::general_purpose::STANDARD;
-            use base64::Engine;
-            let bytes = STANDARD
-                .decode(data)
-                .map_err(|e| format!("base64 디코딩 실패 ({}): {e}", full.display()))?;
-            std::fs::write(&full, bytes)
-                .map_err(|e| format!("파일 쓰기 실패 ({}): {e}", full.display()))
-        }
-    }
+    let bytes = match content {
+        FileContent::Text { content } => content.as_bytes().to_vec(),
+    };
+    std::fs::write(&full, &bytes).map_err(|e| format!("파일 쓰기 실패 ({}): {e}", full.display()))?;
+    Ok(bytes)
 }
 
 /// [`download_and_verify_to_file`]의 결과 — 정상적으로 파일을 받았는지, 아니면
@@ -2369,17 +2838,29 @@ pub(super) fn download_and_verify_to_file(
     Ok(DownloadOutcome::Downloaded(tmp_path))
 }
 
-/// 임시 파일(스트리밍 다운로드 결과)을 확장자로 형식 판별해 `dest_dir` 에 추출.
-/// `dest_dir` 는 비우지 않고 병합 — 여러 압축이 같은 루트/하위 폴더에 겹쳐 설치되는
-/// 걸 지원(예: 본체 + 추가 콘텐츠 팩). 겹쳐 쓴 뒤 화이트리스트 정리
-/// (`prune_disallowed_files`)가 뒤따른다.
-///
-/// `url`은 진행률 이벤트의 표시용 라벨일 뿐 — 형식 판별(zip/7z)은 별도로 받는
-/// `format_hint`의 확장자로 한다. 보통 레시피 URL 자체가 `.zip`/`.7z`로 끝나서 둘이
-/// 같은 문자열이지만, 직접 다운로드가 안 돼 브라우저로 열어 받은 경우엔 `url`이
-/// 실제 파일 링크가 아니라 사람이 눌러 받는 페이지(예: 구글 드라이브 공유
-/// 페이지)라 확장자가 없다 — 그 경우 호출자가 실제로 받은 파일의 이름을
-/// `format_hint`로 따로 넘긴다.
+/// Windows의 "인터넷에서 받음" 표식(Zone.Identifier NTFS ADS)을 남긴다. 브라우저로
+/// 같은 파일을 받았으면 Windows Defender SmartScreen이 실행 시 경고를 띄우는데,
+/// PengPort는 자체 HTTP 클라이언트로 받아 이 표식 없이 그대로 쓰기 때문에 그 경고가
+/// 조용히 사라진다 — 레시피 자체가 정직해도 그 안의 실행 파일이 악성인 경우에 대한
+/// 마지막 OS 방어선이라 자동화 과정에서도 복원한다. 압축 추출은 PengPort가 엔트리를
+/// 직접 풀어 쓰므로(탐색기의 "부모 zip 표식이 자식까지 전파" 동작을 안 탐) 다운로드
+/// 원본뿐 아니라 실제로 디스크에 남는 각 파일에 개별 적용해야 한다. ADS 미지원
+/// 파일시스템 등에서 실패해도 설치 자체를 막을 이유는 없어 로그만 남기고 넘어간다.
+#[cfg(windows)]
+fn stamp_mark_of_the_web(path: &Path) {
+    let ads_path = format!("{}:Zone.Identifier", path.display());
+    if let Err(e) = std::fs::write(&ads_path, b"[ZoneTransfer]\r\nZoneId=3\r\n") {
+        eprintln!("Mark of the Web 기록 실패 ({}): {e}", path.display());
+    }
+}
+
+#[cfg(not(windows))]
+fn stamp_mark_of_the_web(_path: &Path) {}
+
+/// 임시 파일(스트리밍 다운로드 결과)을 매직 바이트로 형식 판별해([`sniff_archive_kind`])
+/// `dest_dir` 에 추출. `dest_dir` 는 비우지 않고 병합 — 여러 압축이 같은 루트/하위
+/// 폴더에 겹쳐 설치되는 걸 지원(예: 본체 + 추가 콘텐츠 팩). 겹쳐 쓴 뒤 화이트리스트
+/// 정리(`prune_disallowed_files`)가 뒤따른다.
 ///
 /// `strip_root`: 그룹 전용 콘텐츠 압축(예: 콘텐츠 팩 하나가 `Content/` 폴더 하나로만
 /// 구성)은 그 최상위 폴더 자체를 벗겨내고 그 안의 내용을 바로 `dest_dir`(=owned 리프
@@ -2388,21 +2869,19 @@ pub(super) fn download_and_verify_to_file(
 /// 이 압축의 배타적 소유 폴더여야 안전하게 통째로 지우고 다시 풀 수 있다).
 ///
 /// 압축 라이브러리의 일괄 추출 헬퍼(`ZipArchive::extract`/`sevenz_rust2::decompress`)
-/// 대신 엔트리를 하나씩 순회한다 — 채보 팩처럼 파일이 1000개 넘는 압축에서 "지금
+/// 대신 엔트리를 하나씩 순회한다 — 콘텐츠 팩처럼 파일이 1000개 넘는 압축에서 "지금
 /// 몇 번째 푸는 중"을 알 수 있는 유일한 방법이라(`docs/design/INSTALL_PROGRESS.md`).
 ///
 /// `raw_filename`이 있으면 압축으로 취급하지 않고, 검증된 임시 파일을
 /// `dest_dir/raw_filename`에 그대로 배치한다 — 아이콘/실행파일/jar 같은 단일 파일
 /// 자산용(`ArchiveExtraction::raw_filename` 참고).
 /// [`extract_archive_file`]의 부가 정보를 묶은 컨텍스트 — 매개변수 개수를 줄이려고
-/// 묶었을 뿐 별도 의미는 없다. `format_hint`도 여기 포함 — `url`(표시용 라벨)과
-/// 형식 판별 대상이 갈리는, 브라우저로 열어 받은 케이스 때문에 별도 필드로
-/// 존재할 뿐, `app`/`recipe_id`와 성격이 다르지 않다(전부 "이 압축 실행 1회에 대한
-/// 부가 정보").
+/// 묶었을 뿐 별도 의미는 없다. `resolutions`도 여기 포함 — 압축 해제 충돌을 사용자가
+/// 어떻게 해결했는지(빈 맵이면 "충돌 없었음"과 동일).
 struct ExtractProgressContext<'a> {
     app: &'a tauri::AppHandle,
     recipe_id: &'a str,
-    format_hint: &'a str,
+    resolutions: &'a HashMap<String, ArchiveEntryResolution>,
 }
 
 fn extract_archive_file(
@@ -2418,14 +2897,21 @@ fn extract_archive_file(
         .map_err(|e| format!("설치 대상 폴더 생성 실패 ({}): {e}", dest_dir.display()))?;
 
     if let Some(filename) = raw_filename {
-        let dst = dest_dir.join(filename);
+        if matches!(ctx.resolutions.get(filename), Some(ArchiveEntryResolution::Skip { .. })) {
+            return Ok(vec![]);
+        }
+        let dst = match ctx.resolutions.get(filename) {
+            Some(ArchiveEntryResolution::Rename { .. }) => unique_fs_path(dest_dir, filename),
+            _ => dest_dir.join(filename),
+        };
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("설치 대상 폴더 생성 실패 ({}): {e}", parent.display()))?;
         }
         std::fs::copy(tmp_path, &dst)
             .map_err(|e| format!("파일 배치 실패 ({}): {e}", dst.display()))?;
-        return Ok(vec![filename.to_string()]);
+        stamp_mark_of_the_web(&dst);
+        return Ok(vec![relative_manifest_path(dest_dir, &dst)]);
     }
 
     let throttle = Throttle::new(Duration::from_millis(150));
@@ -2441,19 +2927,18 @@ fn extract_archive_file(
         }
     };
 
-    let lower = ctx.format_hint.to_ascii_lowercase();
-    if lower.ends_with(".zip") {
-        let file = std::fs::File::open(tmp_path)
-            .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip 열기 실패: {e}"))?;
-        extract_zip_with_progress(&mut archive, dest_dir, strip_root, cancel_flag, on_progress)
-    } else if lower.ends_with(".7z") {
-        let file = std::fs::File::open(tmp_path)
-            .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
-        extract_7z_with_progress(file, dest_dir, strip_root, cancel_flag, on_progress)
-    } else {
-        let format_hint = ctx.format_hint;
-        Err(format!("지원하지 않는 아카이브 형식(.zip/.7z 만 지원): {format_hint}"))
+    match sniff_archive_kind(tmp_path)? {
+        ArchiveKind::Zip => {
+            let file = std::fs::File::open(tmp_path)
+                .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip 열기 실패: {e}"))?;
+            extract_zip_with_progress(&mut archive, dest_dir, strip_root, cancel_flag, ctx.resolutions, on_progress)
+        }
+        ArchiveKind::SevenZ => {
+            let file = std::fs::File::open(tmp_path)
+                .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
+            extract_7z_with_progress(file, dest_dir, strip_root, cancel_flag, ctx.resolutions, on_progress)
+        }
     }
 }
 
@@ -2468,16 +2953,149 @@ fn relative_manifest_path(dest_dir: &Path, full_path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// 압축 안 엔트리 하나의 스캔 결과 — 실제로 쓰기 전에 목적지 경로 + 원본 CRC32만
+/// 안다(압축을 풀지 않고 zip/7z 헤더에서 바로 읽음). `rel_path`는
+/// [`relative_manifest_path`]와 같은 형식이라 [`ArchiveEntryResolution`]의 `path`와
+/// 그대로 대조된다.
+struct ScannedEntry {
+    rel_path: String,
+    dest_path: PathBuf,
+    crc32: u32,
+}
+
+/// [`execute_archive`]가 실제로 쓰기 전에 부르는 스캔 — 디렉토리 엔트리, CRC를 못 구하는
+/// 항목(일부 7z 케이스)은 대상에서 빠진다(그런 항목은 충돌 판정 없이 예전처럼 그냥 씀).
+fn scan_archive_entries(
+    tmp_path: &Path,
+    dest_dir: &Path,
+    strip_root: bool,
+    raw_filename: Option<&str>,
+) -> Result<Vec<ScannedEntry>, String> {
+    if let Some(filename) = raw_filename {
+        let crc32 = crc32_of_file(tmp_path)?;
+        return Ok(vec![ScannedEntry {
+            rel_path: filename.to_string(),
+            dest_path: dest_dir.join(filename),
+            crc32,
+        }]);
+    }
+
+    match sniff_archive_kind(tmp_path)? {
+        ArchiveKind::Zip => {
+            let file = std::fs::File::open(tmp_path)
+                .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip 열기 실패: {e}"))?;
+            let mut out = Vec::new();
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i).map_err(|e| format!("zip 항목 열기 실패: {e}"))?;
+                if entry.is_dir() {
+                    continue;
+                }
+                let name = entry.name().to_string();
+                let crc32 = entry.crc32();
+                if let Some(dest_path) = safe_join_archive_entry(dest_dir, &name, strip_root)? {
+                    out.push(ScannedEntry { rel_path: relative_manifest_path(dest_dir, &dest_path), dest_path, crc32 });
+                }
+            }
+            Ok(out)
+        }
+        ArchiveKind::SevenZ => {
+            let file = std::fs::File::open(tmp_path)
+                .map_err(|e| format!("임시 파일 열기 실패 ({}): {e}", tmp_path.display()))?;
+            let reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
+                .map_err(|e| format!("7z 열기 실패: {e}"))?;
+            let mut out = Vec::new();
+            for entry in &reader.archive().files {
+                if entry.is_directory() || !entry.has_crc {
+                    continue;
+                }
+                if let Some(dest_path) = safe_join_archive_entry(dest_dir, entry.name(), strip_root)? {
+                    out.push(ScannedEntry {
+                        rel_path: relative_manifest_path(dest_dir, &dest_path),
+                        dest_path,
+                        crc32: entry.crc as u32,
+                    });
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// [`scan_archive_entries`]가 계산한 `dest_path`는 "자연스러운"(압축 안 경로 그대로)
+/// 위치일 뿐 — `archive.path_overrides`에 의한 재배치는 실제 추출 후 별도 단계인
+/// [`apply_path_overrides`]가 한다. 충돌 판정([`detect_archive_conflicts`])은 파일이
+/// **실제로 최종 놓일 위치**를 봐야 하므로, 스캔 직후 같은 재배치 규칙
+/// ([`resolve_path_override_target`] — 실제 재배치가 쓰는 것과 동일한 순수 함수)을
+/// 미리 적용해 `dest_path`만 보정한다. `rel_path`는 일부러 안 건드린다 — 실제 추출
+/// 시점의 충돌 해결(`extract_zip_with_progress` 등)이 여전히 자연스러운 경로를
+/// 키로 조회하므로, 여기서 같이 바꾸면 사용자가 고른 해결책이 적용 시점에 못 찾아진다.
+fn apply_path_overrides_to_scan(scanned: Vec<ScannedEntry>, root: &Path, overrides: &[PathOverride]) -> Vec<ScannedEntry> {
+    if overrides.is_empty() {
+        return scanned;
+    }
+    scanned
+        .into_iter()
+        .map(|mut entry| {
+            if let Some(new_to) = resolve_path_override_target(&entry.rel_path, overrides) {
+                entry.dest_path = root.join(&new_to);
+            }
+            entry
+        })
+        .collect()
+}
+
+fn crc32_of_file(path: &Path) -> Result<u32, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("파일 열기 실패 ({}): {e}", path.display()))?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("파일 읽기 실패 ({}): {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize())
+}
+
+/// 스캔된 엔트리 중 "전체 허용 + `ask_on_conflict`" 폴더 밑에 있고, 디스크에 이미
+/// 다른 내용의 파일이 있는 것만 충돌로 본다. 내용이 완전히 같으면(CRC 일치) 잃을 게
+/// 없으니 충돌 아님 — 조용히 덮어써도 됨.
+fn detect_archive_conflicts(scanned: &[ScannedEntry], recipe: &Recipe, root: &Path) -> Vec<String> {
+    let ask_folders: Vec<PathBuf> = recipe
+        .folder_rules
+        .iter()
+        .filter(|r| matches!(r.mode, FolderRuleMode::Passthrough { ask_on_conflict: true }))
+        .map(|r| root.join(&r.path))
+        .collect();
+    if ask_folders.is_empty() {
+        return Vec::new();
+    }
+    scanned
+        .iter()
+        .filter(|e| ask_folders.iter().any(|f| e.dest_path.starts_with(f)))
+        .filter(|e| match std::fs::metadata(&e.dest_path) {
+            Ok(m) if m.is_file() => crc32_of_file(&e.dest_path).map(|c| c != e.crc32).unwrap_or(false),
+            _ => false,
+        })
+        .map(|e| e.rel_path.clone())
+        .collect()
+}
+
 /// zip 엔트리를 하나씩 순회하며 추출 — 진행률 콜백이 필요한 이유는
 /// [`extract_archive_file`] 참고. 경로 안전 검사는 [`safe_join_archive_entry`] 하나로
 /// strip_root 유무 양쪽을 처리(zip 크레이트 자체의 `enclosed_name()`이 하던 zip-slip
-/// 방어를 7z 쪽과 같은 규칙으로 통일). 반환값 = 실제로 쓴 파일들의 `dest_dir` 기준
-/// 상대경로 목록(디렉토리 엔트리 제외) — 그룹 압축의 매니페스트 기록용.
+/// 방어를 7z 쪽과 같은 규칙으로 통일). `resolutions`에 없는 항목(=충돌 없었음)은 예전
+/// 그대로 조용히 덮어씀. 반환값 = 실제로 쓴 파일들의 `dest_dir` 기준 상대경로 목록
+/// (디렉토리 엔트리 제외) — 그룹 압축의 매니페스트 기록용.
 fn extract_zip_with_progress<R: std::io::Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     dest_dir: &Path,
     strip_root: bool,
     cancel_flag: Option<&AtomicBool>,
+    resolutions: &HashMap<String, ArchiveEntryResolution>,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<Vec<String>, String> {
     let total = archive.len();
@@ -2489,7 +3107,7 @@ fn extract_zip_with_progress<R: std::io::Read + std::io::Seek>(
         let mut entry = archive.by_index(i).map_err(|e| format!("zip 항목 열기 실패: {e}"))?;
         let name = entry.name().to_string();
         let is_dir = entry.is_dir();
-        let out_path = match safe_join_archive_entry(dest_dir, &name, strip_root)? {
+        let natural_path = match safe_join_archive_entry(dest_dir, &name, strip_root)? {
             Some(p) => p,
             None => {
                 on_progress(i + 1, total);
@@ -2497,9 +3115,21 @@ fn extract_zip_with_progress<R: std::io::Read + std::io::Seek>(
             }
         };
         if is_dir {
-            std::fs::create_dir_all(&out_path)
-                .map_err(|e| format!("폴더 생성 실패 ({}): {e}", out_path.display()))?;
+            std::fs::create_dir_all(&natural_path)
+                .map_err(|e| format!("폴더 생성 실패 ({}): {e}", natural_path.display()))?;
         } else {
+            let rel_path = relative_manifest_path(dest_dir, &natural_path);
+            if let Some(ArchiveEntryResolution::Skip { .. }) = resolutions.get(&rel_path) {
+                on_progress(i + 1, total);
+                continue;
+            }
+            let out_path = match resolutions.get(&rel_path) {
+                Some(ArchiveEntryResolution::Rename { .. }) => unique_fs_path(
+                    natural_path.parent().unwrap_or(dest_dir),
+                    natural_path.file_name().and_then(|n| n.to_str()).unwrap_or(&name),
+                ),
+                _ => natural_path,
+            };
             if let Some(parent) = out_path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("폴더 생성 실패 ({}): {e}", parent.display()))?;
@@ -2508,6 +3138,8 @@ fn extract_zip_with_progress<R: std::io::Read + std::io::Seek>(
                 .map_err(|e| format!("파일 생성 실패 ({}): {e}", out_path.display()))?;
             std::io::copy(&mut entry, &mut out_file)
                 .map_err(|e| format!("zip 항목 쓰기 실패 ({}): {e}", out_path.display()))?;
+            drop(out_file);
+            stamp_mark_of_the_web(&out_path);
             written.push(relative_manifest_path(dest_dir, &out_path));
         }
         on_progress(i + 1, total);
@@ -2517,12 +3149,14 @@ fn extract_zip_with_progress<R: std::io::Read + std::io::Seek>(
 
 /// 7z 엔트리를 하나씩 순회하며 추출 — `archive().files.len()`으로 전체 개수를 먼저
 /// 얻는다(헤더 파싱만, 엔트리 데이터는 아직 안 읽음). 경로 안전 검사는 zip 쪽과 같은
-/// [`safe_join_archive_entry`] 공유. 반환값은 [`extract_zip_with_progress`]와 동일.
+/// [`safe_join_archive_entry`] 공유. `resolutions` 처리는 [`extract_zip_with_progress`]와
+/// 동일 규칙. 반환값도 동일.
 fn extract_7z_with_progress(
     file: std::fs::File,
     dest_dir: &Path,
     strip_root: bool,
     cancel_flag: Option<&AtomicBool>,
+    resolutions: &HashMap<String, ArchiveEntryResolution>,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<Vec<String>, String> {
     let mut reader = sevenz_rust2::ArchiveReader::new(file, sevenz_rust2::Password::empty())
@@ -2539,12 +3173,30 @@ fn extract_7z_with_progress(
                 }
             }
             let outcome = match safe_join_archive_entry(dest_dir, entry.name(), strip_root) {
-                Ok(Some(path)) => {
-                    let result = sevenz_rust2::default_entry_extract_fn(entry, r, &path);
-                    if result.is_ok() && !entry.is_directory() {
-                        written.push(relative_manifest_path(dest_dir, &path));
+                Ok(Some(natural_path)) => {
+                    let rel_path = relative_manifest_path(dest_dir, &natural_path);
+                    if !entry.is_directory()
+                        && matches!(resolutions.get(&rel_path), Some(ArchiveEntryResolution::Skip { .. }))
+                    {
+                        Ok(true)
+                    } else {
+                        let path = if !entry.is_directory()
+                            && matches!(resolutions.get(&rel_path), Some(ArchiveEntryResolution::Rename { .. }))
+                        {
+                            unique_fs_path(
+                                natural_path.parent().unwrap_or(dest_dir),
+                                natural_path.file_name().and_then(|n| n.to_str()).unwrap_or(entry.name()),
+                            )
+                        } else {
+                            natural_path
+                        };
+                        let result = sevenz_rust2::default_entry_extract_fn(entry, r, &path);
+                        if result.is_ok() && !entry.is_directory() {
+                            stamp_mark_of_the_web(&path);
+                            written.push(relative_manifest_path(dest_dir, &path));
+                        }
+                        result
                     }
-                    result
                 }
                 Ok(None) => Ok(true),
                 Err(msg) => Err(sevenz_rust2::Error::Other(msg.into())),
@@ -2556,13 +3208,37 @@ fn extract_7z_with_progress(
     Ok(written)
 }
 
-/// 압축 안 항목 이름(`entry_name`, 예: `"ESong/o2ma101.ojm"`)을 `dest`에 안전하게
+/// `dir` 안에 `filename`이 이미 있으면 "이름 (2).ext" 형태로 충돌을 피한다(확장자
+/// 보존, 실제로 그 이름의 파일이 없을 때까지 증가) — 프론트 `file-tree-picker.tsx`의
+/// `uniqueTreePath`와 같은 규칙을 그대로 파일시스템에 적용한 버전. 압축 해제 충돌
+/// 해결에서 "이름 바꿔 복사"가 쓴다.
+fn unique_fs_path(dir: &Path, filename: &str) -> PathBuf {
+    let candidate = dir.join(filename);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let dot = filename.rfind('.');
+    let (stem, ext) = match dot {
+        Some(i) if i > 0 => (&filename[..i], &filename[i..]),
+        _ => (filename, ""),
+    };
+    let mut i = 2;
+    loop {
+        let candidate = dir.join(format!("{stem} ({i}){ext}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+/// 압축 안 항목 이름(`entry_name`, 예: `"GroupA/track1.dat"`)을 `dest`에 안전하게
 /// 조인 — zip/7z 공용, `..`/루트/드라이브 컴포넌트를 거부해 zip-slip을 막는다(zip
 /// 크레이트의 `enclosed_name()`, `sevenz_rust2`의 비공개 `safe_join`과 같은 규칙).
 ///
 /// `strip_first`가 true 면 최상위 컴포넌트 하나(그룹 전용 콘텐츠 압축의 owned 폴더
-/// 자체, 예: `"ESong"`)를 먼저 벗겨낸다 — 그 컴포넌트 자체를 가리키는 항목(디렉토리
-/// 엔트리 `"ESong"`, 또는 그 안에 하위 경로가 하나도 없는 경우)은 `Ok(None)`으로
+/// 자체, 예: `"GroupA"`)를 먼저 벗겨낸다 — 그 컴포넌트 자체를 가리키는 항목(디렉토리
+/// 엔트리 `"GroupA"`, 또는 그 안에 하위 경로가 하나도 없는 경우)은 `Ok(None)`으로
 /// 건너뛴다(`dest`는 이미 [`execute_archive`]가 만들어둠). `strip_first`가 false 면
 /// 전체 경로를 그대로 조인한다.
 fn safe_join_archive_entry(dest: &Path, entry_name: &str, strip_first: bool) -> Result<Option<PathBuf>, String> {
@@ -2692,6 +3368,60 @@ mod tests {
 
     use super::*;
 
+    // --- stamp_mark_of_the_web ---
+
+    #[test]
+    #[cfg(windows)]
+    fn stamp_mark_of_the_web_writes_zone_identifier_stream() {
+        let dir = temp_test_dir("motw");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("downloaded.exe");
+        std::fs::write(&path, b"fake exe bytes").unwrap();
+
+        stamp_mark_of_the_web(&path);
+
+        let ads = std::fs::read_to_string(format!("{}:Zone.Identifier", path.display())).unwrap();
+        assert!(ads.contains("ZoneId=3"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exe_under_root_true_when_exe_inside_root() {
+        let root = Path::new("/apps/sampleapp");
+        let exe = Path::new("/apps/sampleapp/SampleApp.exe");
+        assert!(exe_under_root(Some(exe), root));
+    }
+
+    #[test]
+    fn exe_under_root_true_for_nested_subdir() {
+        let root = Path::new("/apps/sampleapp");
+        let exe = Path::new("/apps/sampleapp/bin/updater.exe");
+        assert!(exe_under_root(Some(exe), root));
+    }
+
+    #[test]
+    fn exe_under_root_false_when_outside_root() {
+        let root = Path::new("/apps/sampleapp");
+        let exe = Path::new("/apps/other-app/other.exe");
+        assert!(!exe_under_root(Some(exe), root));
+    }
+
+    #[test]
+    fn exe_under_root_false_when_exe_missing() {
+        let root = Path::new("/apps/sampleapp");
+        assert!(!exe_under_root(None, root));
+    }
+
+    #[test]
+    fn exe_under_root_false_for_sibling_with_shared_prefix() {
+        // "/apps/sampleapp2"는 "/apps/sampleapp"으로 시작하지 않는 별개 경로 —
+        // 문자열 prefix가 아니라 경로 컴포넌트 단위 비교(Path::starts_with)여야 함.
+        let root = Path::new("/apps/sampleapp");
+        let exe = Path::new("/apps/sampleapp2/other.exe");
+        assert!(!exe_under_root(Some(exe), root));
+    }
+
     #[test]
     fn safe_join_no_strip_joins_full_relative_path() {
         let dest = Path::new("/dest");
@@ -2702,25 +3432,25 @@ mod tests {
     #[test]
     fn safe_join_strip_first_removes_top_level_component() {
         let dest = Path::new("/dest");
-        // "ESong/o2ma101.ojm" → 최상위 "ESong" 벗겨내고 dest 밑에 "o2ma101.ojm" 만.
-        let result = safe_join_archive_entry(dest, "ESong/o2ma101.ojm", true).unwrap();
-        assert_eq!(result, Some(dest.join("o2ma101.ojm")));
+        // "GroupA/track1.dat" → 최상위 "GroupA" 벗겨내고 dest 밑에 "track1.dat" 만.
+        let result = safe_join_archive_entry(dest, "GroupA/track1.dat", true).unwrap();
+        assert_eq!(result, Some(dest.join("track1.dat")));
     }
 
     #[test]
     fn safe_join_strip_first_skips_root_only_entry() {
-        // 최상위 폴더 자체를 가리키는 디렉토리 엔트리("ESong")는 dest 가 이미 있으니
+        // 최상위 폴더 자체를 가리키는 디렉토리 엔트리("GroupA")는 dest 가 이미 있으니
         // 건너뛰어야 한다(execute_archive 가 dest_dir 를 미리 만들어둠).
         let dest = Path::new("/dest");
-        assert_eq!(safe_join_archive_entry(dest, "ESong", true).unwrap(), None);
-        assert_eq!(safe_join_archive_entry(dest, "ESong/", true).unwrap(), None);
+        assert_eq!(safe_join_archive_entry(dest, "GroupA", true).unwrap(), None);
+        assert_eq!(safe_join_archive_entry(dest, "GroupA/", true).unwrap(), None);
     }
 
     #[test]
     fn safe_join_rejects_parent_dir_escape() {
         let dest = Path::new("/dest");
         assert!(safe_join_archive_entry(dest, "../../etc/passwd", false).is_err());
-        assert!(safe_join_archive_entry(dest, "ESong/../../../etc/passwd", true).is_err());
+        assert!(safe_join_archive_entry(dest, "GroupA/../../../etc/passwd", true).is_err());
     }
 
     #[test]
@@ -2761,19 +3491,19 @@ mod tests {
     fn apply_path_overrides_moves_matched_file_to_declared_destination() {
         let dest_dir = temp_test_dir("path-overrides-move");
         std::fs::create_dir_all(&dest_dir).unwrap();
-        std::fs::write(dest_dir.join("Playing1.opi"), b"skin content").unwrap();
-        let written = vec!["Playing1.opi".to_string()];
+        std::fs::write(dest_dir.join("asset1.dat"), b"skin content").unwrap();
+        let written = vec!["asset1.dat".to_string()];
         let overrides = vec![PathOverride {
-            from: "Playing1.opi".to_string(),
-            to: "DPJAM/Image/Playing1.opi".to_string(),
+            from: "asset1.dat".to_string(),
+            to: "SampleApp/Image/asset1.dat".to_string(),
         }];
 
         let result = apply_path_overrides(&written, &dest_dir, &dest_dir, &overrides).unwrap();
 
-        assert_eq!(result, vec!["DPJAM/Image/Playing1.opi".to_string()]);
-        assert!(!dest_dir.join("Playing1.opi").exists());
+        assert_eq!(result, vec!["SampleApp/Image/asset1.dat".to_string()]);
+        assert!(!dest_dir.join("asset1.dat").exists());
         assert_eq!(
-            std::fs::read(dest_dir.join("DPJAM/Image/Playing1.opi")).unwrap(),
+            std::fs::read(dest_dir.join("SampleApp/Image/asset1.dat")).unwrap(),
             b"skin content"
         );
         let _ = std::fs::remove_dir_all(&dest_dir);
@@ -2786,8 +3516,8 @@ mod tests {
         std::fs::write(dest_dir.join("other.txt"), b"x").unwrap();
         let written = vec!["other.txt".to_string()];
         let overrides = vec![PathOverride {
-            from: "Playing1.opi".to_string(),
-            to: "DPJAM/Image/Playing1.opi".to_string(),
+            from: "asset1.dat".to_string(),
+            to: "SampleApp/Image/asset1.dat".to_string(),
         }];
 
         let result = apply_path_overrides(&written, &dest_dir, &dest_dir, &overrides).unwrap();
@@ -2807,12 +3537,14 @@ mod tests {
 
     #[test]
     fn apply_path_overrides_moves_whole_folder_via_prefix_match() {
+        // "A/"(트레일링 슬래시) — rsync `src/` 관례처럼 내용만 옮기고 "A" 폴더 이름은
+        // 사라짐.
         let dest_dir = temp_test_dir("path-overrides-folder-prefix");
         std::fs::create_dir_all(dest_dir.join("A/sub")).unwrap();
         std::fs::write(dest_dir.join("A/installer.exe"), b"exe").unwrap();
         std::fs::write(dest_dir.join("A/sub/x.txt"), b"x").unwrap();
         let written = vec!["A/installer.exe".to_string(), "A/sub/x.txt".to_string()];
-        let overrides = vec![PathOverride { from: "A".to_string(), to: "".to_string() }];
+        let overrides = vec![PathOverride { from: "A/".to_string(), to: "".to_string() }];
 
         let mut result = apply_path_overrides(&written, &dest_dir, &dest_dir, &overrides).unwrap();
         result.sort();
@@ -2826,16 +3558,36 @@ mod tests {
     }
 
     #[test]
+    fn apply_path_overrides_keeps_folder_name_without_trailing_slash() {
+        // "A"(슬래시 없음) — rsync `src` 관례처럼 폴더 이름을 유지한 채 `to` 밑에
+        // 통째로 얹는다(`Moved/A/...`).
+        let dest_dir = temp_test_dir("path-overrides-folder-keep-name");
+        std::fs::create_dir_all(dest_dir.join("A/sub")).unwrap();
+        std::fs::write(dest_dir.join("A/installer.exe"), b"exe").unwrap();
+        std::fs::write(dest_dir.join("A/sub/x.txt"), b"x").unwrap();
+        let written = vec!["A/installer.exe".to_string(), "A/sub/x.txt".to_string()];
+        let overrides = vec![PathOverride { from: "A".to_string(), to: "Moved".to_string() }];
+
+        let mut result = apply_path_overrides(&written, &dest_dir, &dest_dir, &overrides).unwrap();
+        result.sort();
+
+        assert_eq!(result, vec!["Moved/A/installer.exe".to_string(), "Moved/A/sub/x.txt".to_string()]);
+        assert!(dest_dir.join("Moved/A/installer.exe").exists());
+        assert!(dest_dir.join("Moved/A/sub/x.txt").exists());
+        let _ = std::fs::remove_dir_all(&dest_dir);
+    }
+
+    #[test]
     fn apply_path_overrides_exact_match_wins_over_folder_prefix() {
         let dest_dir = temp_test_dir("path-overrides-exact-wins");
         std::fs::create_dir_all(dest_dir.join("A")).unwrap();
         std::fs::write(dest_dir.join("A/keep_here.txt"), b"special").unwrap();
         std::fs::write(dest_dir.join("A/normal.txt"), b"normal").unwrap();
         let written = vec!["A/keep_here.txt".to_string(), "A/normal.txt".to_string()];
-        // 폴더 규칙(A -> 루트)보다 먼저 선언돼 있어도, 정확히 일치하는 예외가 이겨야 한다.
+        // 폴더 규칙(A/ -> 루트)보다 먼저 선언돼 있어도, 정확히 일치하는 예외가 이겨야 한다.
         let overrides = vec![
             PathOverride { from: "A/keep_here.txt".to_string(), to: "Special/keep_here.txt".to_string() },
-            PathOverride { from: "A".to_string(), to: "".to_string() },
+            PathOverride { from: "A/".to_string(), to: "".to_string() },
         ];
 
         let mut result = apply_path_overrides(&written, &dest_dir, &dest_dir, &overrides).unwrap();
@@ -2843,23 +3595,6 @@ mod tests {
 
         assert_eq!(result, vec!["Special/keep_here.txt".to_string(), "normal.txt".to_string()]);
         let _ = std::fs::remove_dir_all(&dest_dir);
-    }
-
-    #[test]
-    fn extract_format_hint_uses_url_for_direct_download() {
-        assert_eq!(
-            extract_format_hint("https://cdn.example.com/app.zip", Path::new("/tmp/download.part"), false),
-            "https://cdn.example.com/app.zip",
-        );
-    }
-
-    #[test]
-    fn extract_format_hint_uses_local_file_when_browser_assisted_fallback_used() {
-        let tmp_path = Path::new("/tmp/pengport-tmp/download.zip");
-        assert_eq!(
-            extract_format_hint("https://archive.example/download-page", tmp_path, true),
-            "/tmp/pengport-tmp/download.zip",
-        );
     }
 
     #[test]
@@ -2924,7 +3659,7 @@ mod tests {
     fn dirty_shared_dest_dirs_ignores_optional_group_and_raw_filename_archives() {
         // 그룹/raw_filename 압축은 둘 다 폴더 자체가 화이트리스트라(pruning 자체를
         // skip) dest_dir 를 통째로 신뢰하므로 이 그룹화 대상이 아니다.
-        let grouped = sample_archive_full("https://cdn.example.com/c.7z", 1, "Content", Some("esong"), None);
+        let grouped = sample_archive_full("https://cdn.example.com/c.7z", 1, "Content", Some("groupa"), None);
         let raw = sample_archive_full("https://cdn.example.com/tool.jar", 2, ".minecraft", None, Some("tool.jar"));
         let archives_with_dirty = [(&grouped, true), (&raw, true)];
         assert!(dirty_shared_dest_dirs(Path::new("/root"), &archives_with_dirty).is_empty());
@@ -2963,7 +3698,7 @@ mod tests {
     fn archive_must_run_ignores_dirty_group_for_grouped_archive() {
         // optional_group 압축은 dirty_dest_dirs 에 걸려도 강제 재적용 대상이 아니다 —
         // 자기 마커 유효성만 본다.
-        let grouped = sample_archive_full("https://cdn.example.com/c.7z", 1, "Content", Some("esong"), None);
+        let grouped = sample_archive_full("https://cdn.example.com/c.7z", 1, "Content", Some("groupa"), None);
         let dest_dir = Path::new("/root").join("Content");
         let mut dirty_dest_dirs = HashMap::new();
         dirty_dest_dirs.insert(dest_dir.clone(), 5); // grouped(order 1)보다 높아도 무관 — 애초에 그룹화 대상 아님
@@ -2986,13 +3721,338 @@ mod tests {
         }
     }
 
+    // --- unique_fs_path ---
+
+    #[test]
+    fn unique_fs_path_returns_as_is_when_no_conflict() {
+        let dir = temp_test_dir("unique-fs-path-no-conflict");
+        assert_eq!(unique_fs_path(&dir, "file.txt"), dir.join("file.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_fs_path_appends_number_on_conflict() {
+        let dir = temp_test_dir("unique-fs-path-conflict");
+        std::fs::write(dir.join("file.txt"), b"x").unwrap();
+        assert_eq!(unique_fs_path(&dir, "file.txt"), dir.join("file (2).txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_fs_path_increments_past_multiple_conflicts() {
+        let dir = temp_test_dir("unique-fs-path-multi-conflict");
+        std::fs::write(dir.join("file.txt"), b"x").unwrap();
+        std::fs::write(dir.join("file (2).txt"), b"x").unwrap();
+        std::fs::write(dir.join("file (3).txt"), b"x").unwrap();
+        assert_eq!(unique_fs_path(&dir, "file.txt"), dir.join("file (4).txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_fs_path_preserves_extensionless_filename() {
+        let dir = temp_test_dir("unique-fs-path-no-ext");
+        std::fs::write(dir.join("README"), b"x").unwrap();
+        assert_eq!(unique_fs_path(&dir, "README"), dir.join("README (2)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- sniff_archive_kind ---
+
+    #[test]
+    fn sniff_archive_kind_detects_zip_magic() {
+        let dir = temp_test_dir("sniff-zip");
+        let path = dir.join("a.bin");
+        std::fs::write(&path, [0x50, 0x4B, 0x03, 0x04, 0x00, 0x00]).unwrap();
+        assert_eq!(sniff_archive_kind(&path).unwrap(), ArchiveKind::Zip);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sniff_archive_kind_detects_7z_magic() {
+        let dir = temp_test_dir("sniff-7z");
+        let path = dir.join("a.bin");
+        std::fs::write(&path, [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]).unwrap();
+        assert_eq!(sniff_archive_kind(&path).unwrap(), ArchiveKind::SevenZ);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sniff_archive_kind_rejects_unknown_magic() {
+        let dir = temp_test_dir("sniff-unknown");
+        let path = dir.join("a.bin");
+        std::fs::write(&path, b"not an archive").unwrap();
+        assert!(sniff_archive_kind(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- crc32_of_file ---
+
+    #[test]
+    fn crc32_of_file_matches_crc32fast_direct() {
+        let dir = temp_test_dir("crc32-of-file");
+        let path = dir.join("a.bin");
+        std::fs::write(&path, b"hello pengport").unwrap();
+        assert_eq!(crc32_of_file(&path).unwrap(), crc32fast::hash(b"hello pengport"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- detect_archive_conflicts ---
+
+    fn recipe_with_passthrough_ask_folder(path: &str, ask_on_conflict: bool) -> Recipe {
+        let mut recipe = sample_recipe_with_archives(vec![]);
+        recipe.folder_rules.push(FolderRule {
+            path: path.to_string(),
+            mode: FolderRuleMode::Passthrough { ask_on_conflict },
+        });
+        recipe
+    }
+
+    #[test]
+    fn detect_archive_conflicts_none_when_no_ask_folders() {
+        let recipe = sample_recipe_with_archives(vec![]);
+        let scanned = vec![ScannedEntry {
+            rel_path: "save.dat".to_string(),
+            dest_path: PathBuf::from("/root/saves/save.dat"),
+            crc32: 123,
+        }];
+        assert!(detect_archive_conflicts(&scanned, &recipe, Path::new("/root")).is_empty());
+    }
+
+    #[test]
+    fn detect_archive_conflicts_none_when_ask_disabled() {
+        let recipe = recipe_with_passthrough_ask_folder("saves", false);
+        let dir = temp_test_dir("archive-conflict-ask-disabled");
+        std::fs::create_dir_all(dir.join("saves")).unwrap();
+        std::fs::write(dir.join("saves/save.dat"), b"existing content").unwrap();
+        let scanned = vec![ScannedEntry {
+            rel_path: "saves/save.dat".to_string(),
+            dest_path: dir.join("saves/save.dat"),
+            crc32: crc32fast::hash(b"archive content"), // 디스크와 다른 내용
+        }];
+        assert!(detect_archive_conflicts(&scanned, &recipe, &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_archive_conflicts_none_when_content_identical() {
+        let recipe = recipe_with_passthrough_ask_folder("saves", true);
+        let dir = temp_test_dir("archive-conflict-identical");
+        std::fs::create_dir_all(dir.join("saves")).unwrap();
+        std::fs::write(dir.join("saves/save.dat"), b"same content").unwrap();
+        let scanned = vec![ScannedEntry {
+            rel_path: "saves/save.dat".to_string(),
+            dest_path: dir.join("saves/save.dat"),
+            crc32: crc32fast::hash(b"same content"),
+        }];
+        assert!(detect_archive_conflicts(&scanned, &recipe, &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_archive_conflicts_flags_when_content_differs() {
+        let recipe = recipe_with_passthrough_ask_folder("saves", true);
+        let dir = temp_test_dir("archive-conflict-differs");
+        std::fs::create_dir_all(dir.join("saves")).unwrap();
+        std::fs::write(dir.join("saves/save.dat"), b"user's own content").unwrap();
+        let scanned = vec![ScannedEntry {
+            rel_path: "saves/save.dat".to_string(),
+            dest_path: dir.join("saves/save.dat"),
+            crc32: crc32fast::hash(b"archive content"),
+        }];
+        let conflicts = detect_archive_conflicts(&scanned, &recipe, &dir);
+        assert_eq!(conflicts, vec!["saves/save.dat".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_archive_conflicts_none_when_dest_missing() {
+        let recipe = recipe_with_passthrough_ask_folder("saves", true);
+        let dir = temp_test_dir("archive-conflict-missing");
+        std::fs::create_dir_all(dir.join("saves")).unwrap(); // save.dat 자체는 없음
+        let scanned = vec![ScannedEntry {
+            rel_path: "saves/save.dat".to_string(),
+            dest_path: dir.join("saves/save.dat"),
+            crc32: 42,
+        }];
+        assert!(detect_archive_conflicts(&scanned, &recipe, &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_archive_conflicts_none_when_path_outside_ask_folder() {
+        let recipe = recipe_with_passthrough_ask_folder("saves", true);
+        let dir = temp_test_dir("archive-conflict-outside");
+        std::fs::create_dir_all(dir.join("other")).unwrap();
+        std::fs::write(dir.join("other/file.txt"), b"existing").unwrap();
+        let scanned = vec![ScannedEntry {
+            rel_path: "other/file.txt".to_string(),
+            dest_path: dir.join("other/file.txt"),
+            crc32: crc32fast::hash(b"different"),
+        }];
+        assert!(detect_archive_conflicts(&scanned, &recipe, &dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- apply_path_overrides_to_scan ---
+
+    #[test]
+    fn apply_path_overrides_to_scan_remaps_dest_path_but_keeps_rel_path() {
+        // 압축 안에서는 "SampleApp/Launcher.exe"로 보이지만, path_overrides(from: "SampleApp",
+        // to: "")로 실제로는 루트에 최종적으로 놓인다 — 충돌 판정은 그 최종 위치를
+        // 봐야 한다. 다만 rel_path(적용 시점 해결책 조회 키)는 자연 경로 그대로여야
+        // extract_zip_with_progress 등이 여전히 찾을 수 있다.
+        let root = Path::new("/root");
+        let dest_dir = root.join("SampleApp");
+        let scanned = vec![ScannedEntry {
+            rel_path: "SampleApp/Launcher.exe".to_string(),
+            dest_path: dest_dir.join("SampleApp/Launcher.exe"),
+            crc32: 1,
+        }];
+        let overrides = vec![PathOverride { from: "SampleApp/".to_string(), to: "".to_string() }];
+        let remapped = apply_path_overrides_to_scan(scanned, root, &overrides);
+        assert_eq!(remapped.len(), 1);
+        assert_eq!(remapped[0].dest_path, root.join("Launcher.exe"));
+        assert_eq!(remapped[0].rel_path, "SampleApp/Launcher.exe"); // 안 바뀜
+    }
+
+    #[test]
+    fn apply_path_overrides_to_scan_no_op_when_empty() {
+        let root = Path::new("/root");
+        let scanned = vec![ScannedEntry {
+            rel_path: "a.txt".to_string(),
+            dest_path: root.join("a.txt"),
+            crc32: 1,
+        }];
+        let remapped = apply_path_overrides_to_scan(scanned, root, &[]);
+        assert_eq!(remapped[0].dest_path, root.join("a.txt"));
+    }
+
+    #[test]
+    fn apply_path_overrides_to_scan_leaves_unmatched_entries_untouched() {
+        let root = Path::new("/root");
+        let dest_dir = root.join("SampleApp");
+        let scanned = vec![ScannedEntry {
+            rel_path: "other/file.txt".to_string(),
+            dest_path: dest_dir.join("other/file.txt"),
+            crc32: 1,
+        }];
+        let overrides = vec![PathOverride { from: "SampleApp".to_string(), to: "".to_string() }];
+        let remapped = apply_path_overrides_to_scan(scanned, root, &overrides);
+        assert_eq!(remapped[0].dest_path, dest_dir.join("other/file.txt")); // 안 바뀜
+    }
+
+    // --- pending resolutions round-trip ---
+
+    #[test]
+    fn pending_resolutions_round_trip() {
+        let dir = temp_test_dir("pending-resolutions-roundtrip");
+        let resolutions = vec![
+            ArchiveEntryResolution::Overwrite { path: "a.txt".to_string() },
+            ArchiveEntryResolution::Skip { path: "b.txt".to_string() },
+            ArchiveEntryResolution::Rename { path: "c.txt".to_string() },
+        ];
+        write_pending_resolutions(&dir, "hash1", &resolutions).unwrap();
+        let read_back = read_pending_resolutions(&dir, "hash1").unwrap();
+        assert_eq!(read_back.len(), 3);
+        assert!(matches!(read_back[0], ArchiveEntryResolution::Overwrite { .. }));
+        assert!(matches!(read_back[1], ArchiveEntryResolution::Skip { .. }));
+        assert!(matches!(read_back[2], ArchiveEntryResolution::Rename { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_pending_resolutions_none_when_missing() {
+        let dir = temp_test_dir("pending-resolutions-missing");
+        assert!(read_pending_resolutions(&dir, "nonexistent").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- prune_orphaned_pending_conflicts ---
+
+    #[test]
+    fn prune_orphaned_pending_conflicts_removes_unmatched_hashes() {
+        let dir = temp_test_dir("prune-orphaned-pending");
+        let a = sample_archive_full("https://cdn.example.com/a.7z", 1, "A", None, None);
+        let current_hash = archive_content_hash(&a).unwrap();
+        let recipe = sample_recipe_with_archives(vec![a]);
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{current_hash}.download")), b"keep me").unwrap();
+        std::fs::write(dir.join("stalehash123.download"), b"orphan").unwrap();
+        std::fs::write(dir.join("stalehash123.resolutions.json"), b"[]").unwrap();
+
+        prune_orphaned_pending_conflicts(&recipe, &dir);
+
+        assert!(dir.join(format!("{current_hash}.download")).exists());
+        assert!(!dir.join("stalehash123.download").exists());
+        assert!(!dir.join("stalehash123.resolutions.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- extract_zip_with_progress resolutions handling ---
+
+    fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, content) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn extract_zip_with_progress_applies_skip_and_rename_resolutions() {
+        let dir = temp_test_dir("extract-zip-resolutions");
+        let zip_path = dir.join("archive.zip");
+        write_test_zip(
+            &zip_path,
+            &[
+                ("normal.txt", b"normal content" as &[u8]),
+                ("skip_me.txt", b"skip content"),
+                ("rename_me.txt", b"rename content"),
+            ],
+        );
+        let dest_dir = dir.join("dest");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        // rename_me.txt는 이미 다른 내용으로 존재 — "이름 바꿔 복사"가 그걸 안
+        // 건드리고 압축 내용은 새 이름으로 따로 씀을 확인하기 위함.
+        std::fs::write(dest_dir.join("rename_me.txt"), b"pre-existing user content").unwrap();
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut resolutions = HashMap::new();
+        resolutions.insert(
+            "skip_me.txt".to_string(),
+            ArchiveEntryResolution::Skip { path: "skip_me.txt".to_string() },
+        );
+        resolutions.insert(
+            "rename_me.txt".to_string(),
+            ArchiveEntryResolution::Rename { path: "rename_me.txt".to_string() },
+        );
+
+        let written =
+            extract_zip_with_progress(&mut archive, &dest_dir, false, None, &resolutions, |_, _| {}).unwrap();
+
+        assert!(dest_dir.join("normal.txt").exists());
+        assert!(!dest_dir.join("skip_me.txt").exists());
+        assert_eq!(std::fs::read(dest_dir.join("rename_me.txt")).unwrap(), b"pre-existing user content");
+        assert_eq!(std::fs::read(dest_dir.join("rename_me (2).txt")).unwrap(), b"rename content");
+        assert!(written.iter().any(|w| w == "normal.txt"));
+        assert!(written.iter().any(|w| w == "rename_me (2).txt"));
+        assert!(!written.iter().any(|w| w == "skip_me.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn ancestor_archives_finds_base_archive_covering_grouped_dest_dir() {
-        let base = sample_archive_full("https://cdn.example.com/dpjam.7z", 1, "", None, None);
-        let esong = sample_archive_full("https://cdn.example.com/esong.7z", 2, "DPJAM/ESong", Some("esong"), None);
-        let recipe = sample_recipe_with_archives(vec![base.clone(), esong]);
+        let base = sample_archive_full("https://cdn.example.com/sampleapp.7z", 1, "", None, None);
+        let groupa = sample_archive_full("https://cdn.example.com/groupa.7z", 2, "SampleApp/GroupA", Some("groupa"), None);
+        let recipe = sample_recipe_with_archives(vec![base.clone(), groupa]);
         let root = Path::new("/root");
-        let wiped = root.join("DPJAM").join("ESong");
+        let wiped = root.join("SampleApp").join("GroupA");
 
         let ancestors = ancestor_archives(&recipe, root, &wiped);
         assert_eq!(ancestors.len(), 1);
@@ -3001,24 +4061,24 @@ mod tests {
 
     #[test]
     fn ancestor_archives_does_not_include_sibling_groups() {
-        // 형제 그룹(NSong)은 ESong 삭제에 영향받으면 안 된다 — 서로 조상 관계가 아님.
-        let base = sample_archive_full("https://cdn.example.com/dpjam.7z", 1, "", None, None);
-        let esong = sample_archive_full("https://cdn.example.com/esong.7z", 2, "DPJAM/ESong", Some("esong"), None);
-        let nsong = sample_archive_full("https://cdn.example.com/nsong.7z", 3, "DPJAM/NSong", Some("nsong"), None);
-        let recipe = sample_recipe_with_archives(vec![base, esong, nsong]);
+        // 형제 그룹(GroupB)은 GroupA 삭제에 영향받으면 안 된다 — 서로 조상 관계가 아님.
+        let base = sample_archive_full("https://cdn.example.com/sampleapp.7z", 1, "", None, None);
+        let groupa = sample_archive_full("https://cdn.example.com/groupa.7z", 2, "SampleApp/GroupA", Some("groupa"), None);
+        let groupb = sample_archive_full("https://cdn.example.com/groupb.7z", 3, "SampleApp/GroupB", Some("groupb"), None);
+        let recipe = sample_recipe_with_archives(vec![base, groupa, groupb]);
         let root = Path::new("/root");
-        let wiped = root.join("DPJAM").join("ESong");
+        let wiped = root.join("SampleApp").join("GroupA");
 
         let ancestors = ancestor_archives(&recipe, root, &wiped);
-        assert!(!ancestors.iter().any(|a| a.url.contains("nsong")));
+        assert!(!ancestors.iter().any(|a| a.url.contains("groupb")));
     }
 
     #[test]
     fn ancestor_archives_excludes_self() {
-        let esong = sample_archive_full("https://cdn.example.com/esong.7z", 1, "DPJAM/ESong", Some("esong"), None);
-        let recipe = sample_recipe_with_archives(vec![esong]);
+        let groupa = sample_archive_full("https://cdn.example.com/groupa.7z", 1, "SampleApp/GroupA", Some("groupa"), None);
+        let recipe = sample_recipe_with_archives(vec![groupa]);
         let root = Path::new("/root");
-        let wiped = root.join("DPJAM").join("ESong");
+        let wiped = root.join("SampleApp").join("GroupA");
 
         assert!(ancestor_archives(&recipe, root, &wiped).is_empty());
     }
@@ -3100,6 +4160,191 @@ mod tests {
         RecipeFile { path: path.to_string(), override_content: None, optional_group: None }
     }
 
+    fn sample_recipe_with_files(files: Vec<RecipeFile>) -> Recipe {
+        Recipe {
+            id: "sample".to_string(),
+            name: "Sample".to_string(),
+            recipe_info: Default::default(),
+            archives: vec![],
+            files,
+            optional_groups: vec![],
+            folder_rules: vec![],
+            launch: LaunchAction::SpawnProcess { entry_point: "x.exe".to_string(), entry_args: vec![] },
+        }
+    }
+
+    fn sample_literal_text_file(path: &str, text: &str) -> RecipeFile {
+        RecipeFile {
+            path: path.to_string(),
+            override_content: Some(OverrideContent::Literal {
+                content: FileContent::Text { content: text.to_string() },
+            }),
+            optional_group: None,
+        }
+    }
+
+    // --- 적용 지문 / declined 마커 ---
+
+    #[test]
+    fn path_fingerprint_round_trip() {
+        let dir = temp_test_dir("fingerprint-roundtrip");
+        let markers_dir = dir.join(".pengport-markers");
+        write_path_fingerprint(&markers_dir, "SampleApp/option.ini", b"[GRAPHICS]\n3D_Mode=0\n").unwrap();
+        assert_eq!(
+            read_path_fingerprint(&markers_dir, "SampleApp/option.ini"),
+            Some(sha256_hex(b"[GRAPHICS]\n3D_Mode=0\n")),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_path_fingerprint_none_when_missing() {
+        let dir = temp_test_dir("fingerprint-missing");
+        let markers_dir = dir.join(".pengport-markers");
+        assert!(read_path_fingerprint(&markers_dir, "no/such/path.txt").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_resolved_true_when_done_marker_exists() {
+        let dir = temp_test_dir("resolved-done");
+        let markers_dir = dir.join(".pengport-markers");
+        write_marker(&markers_dir, "abc").unwrap();
+        assert!(is_resolved(&markers_dir, "abc"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_resolved_true_when_declined_marker_exists() {
+        let dir = temp_test_dir("resolved-declined");
+        let markers_dir = dir.join(".pengport-markers");
+        write_declined_marker(&markers_dir, "abc").unwrap();
+        assert!(is_resolved(&markers_dir, "abc"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_resolved_false_when_neither_marker_exists() {
+        let dir = temp_test_dir("resolved-neither");
+        let markers_dir = dir.join(".pengport-markers");
+        assert!(!is_resolved(&markers_dir, "abc"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- detect_override_conflicts ---
+
+    #[test]
+    fn detect_override_conflicts_none_when_fingerprint_missing() {
+        // 이 path를 이 메커니즘으로 관리한 적 없음(첫 설치 포함) — 비교 대상 자체가
+        // 없어 충돌이 아니다.
+        let dir = temp_test_dir("conflict-no-fingerprint");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("option.ini"), b"whatever is already there").unwrap();
+        let markers_dir = dir.join(".pengport-markers");
+        let recipe =
+            sample_recipe_with_files(vec![sample_literal_text_file("option.ini", "[GRAPHICS]\n3D_Mode=1\n")]);
+
+        let conflicts = detect_override_conflicts(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
+        assert!(conflicts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_override_conflicts_none_when_disk_matches_fingerprint() {
+        let dir = temp_test_dir("conflict-matches");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let bytes = b"[GRAPHICS]\n3D_Mode=1\n";
+        std::fs::write(root.join("option.ini"), bytes).unwrap();
+        let markers_dir = dir.join(".pengport-markers");
+        write_path_fingerprint(&markers_dir, "option.ini", bytes).unwrap();
+        let recipe =
+            sample_recipe_with_files(vec![sample_literal_text_file("option.ini", "[GRAPHICS]\n3D_Mode=2\n")]);
+
+        let conflicts = detect_override_conflicts(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
+        assert!(conflicts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_override_conflicts_flags_when_disk_differs_from_fingerprint() {
+        let dir = temp_test_dir("conflict-drift");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("option.ini"), b"[GRAPHICS]\n3D_Mode=9\n").unwrap(); // 유저가 직접 바꿈
+        let markers_dir = dir.join(".pengport-markers");
+        write_path_fingerprint(&markers_dir, "option.ini", b"[GRAPHICS]\n3D_Mode=1\n").unwrap(); // 마지막으로 PengPort가 쓴 값
+        let recipe =
+            sample_recipe_with_files(vec![sample_literal_text_file("option.ini", "[GRAPHICS]\n3D_Mode=2\n")]); // 새 선언값
+
+        let conflicts = detect_override_conflicts(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].path, "option.ini");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_override_conflicts_none_when_already_resolved() {
+        let dir = temp_test_dir("conflict-resolved");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("option.ini"), b"drifted content").unwrap();
+        let markers_dir = dir.join(".pengport-markers");
+        write_path_fingerprint(&markers_dir, "option.ini", b"original written content").unwrap();
+        let recipe =
+            sample_recipe_with_files(vec![sample_literal_text_file("option.ini", "[GRAPHICS]\n3D_Mode=2\n")]);
+        let hash = file_override_hash(&recipe.files[0]).unwrap();
+        write_declined_marker(&markers_dir, &hash).unwrap(); // 이미 "업데이트하지 않기"를 고름
+
+        let conflicts = detect_override_conflicts(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
+        assert!(conflicts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_override_conflicts_none_when_disk_file_missing() {
+        let dir = temp_test_dir("conflict-file-missing");
+        let root = dir.join("root"); // option.ini 자체를 안 만듦(지워졌다고 가정)
+        std::fs::create_dir_all(&root).unwrap();
+        let markers_dir = dir.join(".pengport-markers");
+        write_path_fingerprint(&markers_dir, "option.ini", b"original written content").unwrap();
+        let recipe =
+            sample_recipe_with_files(vec![sample_literal_text_file("option.ini", "[GRAPHICS]\n3D_Mode=2\n")]);
+
+        let conflicts = detect_override_conflicts(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
+        assert!(conflicts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- adopt_disk_content ---
+
+    #[test]
+    fn adopt_disk_content_wraps_utf8_bytes_as_text() {
+        let content = adopt_disk_content(b"[GRAPHICS]\n3D_Mode=9\n".to_vec()).unwrap();
+        match content {
+            FileContent::Text { content } => assert_eq!(content, "[GRAPHICS]\n3D_Mode=9\n"),
+        }
+    }
+
+    #[test]
+    fn adopt_disk_content_rejects_non_utf8_bytes() {
+        let invalid_utf8 = vec![0xFF, 0xFE, 0x00];
+        let err = adopt_disk_content(invalid_utf8).unwrap_err();
+        assert!(err.contains("텍스트가 아니라"));
+    }
+
+    // --- OverrideConflictResolution wire format ---
+
+    #[test]
+    fn override_conflict_resolution_overwrite_ignores_extra_path_field() {
+        // frontend는 균일한 배열을 위해 모든 액션에 path를 같이 보내지만, Overwrite는
+        // Rust 쪽에 그 필드가 없다 — serde가 모르는 JSON 필드를 조용히 무시하는지 확인.
+        let json = r#"{"action":"overwrite","path":"option.ini"}"#;
+        let resolution: OverrideConflictResolution = serde_json::from_str(json).unwrap();
+        assert!(matches!(resolution, OverrideConflictResolution::Overwrite));
+    }
+
     #[test]
     fn prune_disallowed_files_deletes_pengport_markers_when_not_excluded() {
         let dest_dir = temp_test_dir("prune-markers-bug");
@@ -3138,7 +4383,7 @@ mod tests {
 
     #[test]
     fn folder_rule_dest_dirs_includes_every_declared_path_regardless_of_mode() {
-        let recipe = recipe_with_folder_rule(FolderRuleMode::Passthrough);
+        let recipe = recipe_with_folder_rule(FolderRuleMode::Passthrough { ask_on_conflict: false });
         let root = Path::new("/root");
         assert_eq!(folder_rule_dest_dirs(&recipe, root), vec![root.join("SampleApp/saves")]);
     }
@@ -3229,7 +4474,7 @@ mod tests {
         std::fs::create_dir_all(root.join("SampleApp/saves")).unwrap();
         std::fs::write(root.join("SampleApp/saves/anything.bin"), b"whatever").unwrap();
 
-        let recipe = recipe_with_folder_rule(FolderRuleMode::Passthrough);
+        let recipe = recipe_with_folder_rule(FolderRuleMode::Passthrough { ask_on_conflict: false });
         let markers_dir = root.join(".pengport-markers");
 
         apply_folder_rules(&recipe, &HashSet::new(), &root, &markers_dir).unwrap();
@@ -3279,18 +4524,18 @@ mod tests {
     #[test]
     fn missing_declared_files_reports_only_absent_ones_under_extract_to() {
         let root = temp_test_dir("missing-declared-files");
-        std::fs::create_dir_all(root.join("DPJAM")).unwrap();
-        std::fs::write(root.join("DPJAM/Launcher.exe"), b"exists").unwrap();
-        // "DPJAM/OTwo.exe"는 일부러 안 만듦 — 실제로 없는 케이스.
+        std::fs::create_dir_all(root.join("SampleApp")).unwrap();
+        std::fs::write(root.join("SampleApp/Launcher.exe"), b"exists").unwrap();
+        // "SampleApp/Other.exe"는 일부러 안 만듦 — 실제로 없는 케이스.
 
-        let present = sample_recipe_file("DPJAM/Launcher.exe");
-        let missing = sample_recipe_file("DPJAM/OTwo.exe");
+        let present = sample_recipe_file("SampleApp/Launcher.exe");
+        let missing = sample_recipe_file("SampleApp/Other.exe");
         let outside_scope = sample_recipe_file("Other/unrelated.txt");
         let effective: Vec<&RecipeFile> = vec![&present, &missing, &outside_scope];
 
         let cache = build_dir_listing_cache(&root, &effective);
-        let result = missing_declared_files("DPJAM", &effective, &cache);
-        assert_eq!(result, vec!["DPJAM/OTwo.exe".to_string()]);
+        let result = missing_declared_files("SampleApp", &effective, &cache);
+        assert_eq!(result, vec!["SampleApp/Other.exe".to_string()]);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3318,21 +4563,21 @@ mod tests {
     #[test]
     fn missing_declared_files_handles_multiple_parent_directories() {
         let root = temp_test_dir("missing-declared-files-multi-parent");
-        std::fs::create_dir_all(root.join("DPJAM/ESong")).unwrap();
-        std::fs::write(root.join("DPJAM/ESong/song1.ojn"), b"x").unwrap();
-        // DPJAM/NSong 디렉토리는 아예 안 만듦 — 부모 자체가 없는 케이스.
+        std::fs::create_dir_all(root.join("SampleApp/GroupA")).unwrap();
+        std::fs::write(root.join("SampleApp/GroupA/item1.dat"), b"x").unwrap();
+        // SampleApp/GroupB 디렉토리는 아예 안 만듦 — 부모 자체가 없는 케이스.
 
         let files = [
-            sample_recipe_file("DPJAM/ESong/song1.ojn"), // 존재
-            sample_recipe_file("DPJAM/ESong/song2.ojn"), // 부모는 있지만 파일 없음
-            sample_recipe_file("DPJAM/NSong/song3.ojn"), // 부모부터 없음
+            sample_recipe_file("SampleApp/GroupA/item1.dat"), // 존재
+            sample_recipe_file("SampleApp/GroupA/item2.dat"), // 부모는 있지만 파일 없음
+            sample_recipe_file("SampleApp/GroupB/item3.dat"), // 부모부터 없음
         ];
         let effective: Vec<&RecipeFile> = files.iter().collect();
 
         let cache = build_dir_listing_cache(&root, &effective);
-        let mut result = missing_declared_files("DPJAM", &effective, &cache);
+        let mut result = missing_declared_files("SampleApp", &effective, &cache);
         result.sort();
-        assert_eq!(result, vec!["DPJAM/ESong/song2.ojn".to_string(), "DPJAM/NSong/song3.ojn".to_string()]);
+        assert_eq!(result, vec!["SampleApp/GroupA/item2.dat".to_string(), "SampleApp/GroupB/item3.dat".to_string()]);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3340,22 +4585,22 @@ mod tests {
     #[test]
     fn remove_grouped_archive_content_with_manifest_preserves_untracked_files() {
         let root = temp_test_dir("manifest-precise");
-        let dest_dir = root.join("DPJAM").join("ESong");
+        let dest_dir = root.join("SampleApp").join("GroupA");
         std::fs::create_dir_all(&dest_dir).unwrap();
-        std::fs::write(dest_dir.join("o2ma1000.ojm"), b"chart").unwrap(); // ESong.7z 소유
-        std::fs::write(dest_dir.join("bg2006.ojm"), b"shared bgm").unwrap(); // DPJAM.7z 소유
+        std::fs::write(dest_dir.join("track2.dat"), b"chart").unwrap(); // GroupA.7z 소유
+        std::fs::write(dest_dir.join("shared.dat"), b"shared bgm").unwrap(); // SampleApp.7z 소유
 
-        let esong = sample_archive_full("https://cdn.example.com/esong.7z", 2, "DPJAM/ESong", Some("esong"), None);
-        let recipe = sample_recipe_with_archives(vec![esong.clone()]);
+        let groupa = sample_archive_full("https://cdn.example.com/groupa.7z", 2, "SampleApp/GroupA", Some("groupa"), None);
+        let recipe = sample_recipe_with_archives(vec![groupa.clone()]);
         let markers_dir = root.join(".pengport-markers");
-        let hash = archive_content_hash(&esong).unwrap();
-        write_manifest(&markers_dir, &hash, &["o2ma1000.ojm".to_string()]).unwrap();
+        let hash = archive_content_hash(&groupa).unwrap();
+        write_manifest(&markers_dir, &hash, &["track2.dat".to_string()]).unwrap();
         write_marker(&markers_dir, &hash).unwrap();
 
-        remove_grouped_archive_content(&recipe, &root, &markers_dir, &esong).unwrap();
+        remove_grouped_archive_content(&recipe, &root, &markers_dir, &groupa).unwrap();
 
-        assert!(!dest_dir.join("o2ma1000.ojm").exists(), "매니페스트에 있던 파일은 삭제돼야 함");
-        assert!(dest_dir.join("bg2006.ojm").exists(), "매니페스트에 없던(다른 압축 소유) 파일은 보존돼야 함");
+        assert!(!dest_dir.join("track2.dat").exists(), "매니페스트에 있던 파일은 삭제돼야 함");
+        assert!(dest_dir.join("shared.dat").exists(), "매니페스트에 없던(다른 압축 소유) 파일은 보존돼야 함");
         assert!(!marker_exists(&markers_dir, &hash));
         assert!(read_manifest(&markers_dir, &hash).is_none());
 
@@ -3365,20 +4610,20 @@ mod tests {
     #[test]
     fn remove_grouped_archive_content_without_manifest_falls_back_to_full_wipe_and_invalidates_ancestor() {
         let root = temp_test_dir("manifest-fallback");
-        let dest_dir = root.join("DPJAM").join("ESong");
+        let dest_dir = root.join("SampleApp").join("GroupA");
         std::fs::create_dir_all(&dest_dir).unwrap();
         std::fs::write(dest_dir.join("anything.ojm"), b"x").unwrap();
 
-        let base = sample_archive_full("https://cdn.example.com/dpjam.7z", 1, "", None, None);
-        let esong = sample_archive_full("https://cdn.example.com/esong.7z", 2, "DPJAM/ESong", Some("esong"), None);
-        let recipe = sample_recipe_with_archives(vec![base.clone(), esong.clone()]);
+        let base = sample_archive_full("https://cdn.example.com/sampleapp.7z", 1, "", None, None);
+        let groupa = sample_archive_full("https://cdn.example.com/groupa.7z", 2, "SampleApp/GroupA", Some("groupa"), None);
+        let recipe = sample_recipe_with_archives(vec![base.clone(), groupa.clone()]);
         let markers_dir = root.join(".pengport-markers");
         let base_hash = archive_content_hash(&base).unwrap();
         write_marker(&markers_dir, &base_hash).unwrap();
-        write_marker(&markers_dir, &archive_content_hash(&esong).unwrap()).unwrap();
-        // esong 마커만 있고 매니페스트는 없음(레거시/유실 시뮬레이션).
+        write_marker(&markers_dir, &archive_content_hash(&groupa).unwrap()).unwrap();
+        // groupa 마커만 있고 매니페스트는 없음(레거시/유실 시뮬레이션).
 
-        remove_grouped_archive_content(&recipe, &root, &markers_dir, &esong).unwrap();
+        remove_grouped_archive_content(&recipe, &root, &markers_dir, &groupa).unwrap();
 
         assert!(!dest_dir.exists(), "매니페스트 없으면 폴더 통째로 지워야 함");
         assert!(!marker_exists(&markers_dir, &base_hash), "조상(base) 마커도 무효화돼야 함");

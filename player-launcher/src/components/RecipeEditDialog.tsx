@@ -15,19 +15,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
-import { Field, inputClass, RemoveButton, Select, TextInput } from "@/components/ui/form-fields";
-import { buildFileTree, DestinationPathPicker, type FileTreeFolder } from "@/components/ui/file-tree-picker";
+import { ClearFieldButton, Field, inputClass, RemoveButton, Select, TextInput } from "@/components/ui/form-fields";
+import {
+  buildFileTree,
+  collectExistingTreePaths,
+  DestinationPathPicker,
+  uniqueTreePath,
+} from "@/components/ui/file-tree-picker";
+import {
+  fileKey,
+  FileTreeView,
+  folderKey,
+  parseTreeKey,
+  type OverrideKind,
+} from "@/components/RecipeFileTree";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 import {
   computeFileSha256,
   listThirdPartyAppIds,
-  readConfigFileAsPatch,
+  readFileBase64,
   scanFolderRelativePaths,
 } from "@/lib/library";
 import type {
   ArchiveExtraction,
   ArtifactVerification,
-  ConfigFileFormat,
-  ConfigPatch,
   FileContent,
   FolderRule,
   FolderRuleMode,
@@ -49,7 +60,6 @@ interface Props {
 }
 
 type LaunchActionKind = LaunchAction["kind"];
-type OverrideKind = OverrideContent["kind"] | "none";
 
 // 폼이 길어져(archives/files 는 항목이 수십~수백 개까지 늘어날 수 있음) 한 화면
 // 세로 스크롤 대신 사이드바 탭으로 나눈다 — 탭 사이 이동은 순수 로컬 UI 상태일 뿐
@@ -72,12 +82,6 @@ const TAB_LABELS: Record<RecipeEditTab, string> = {
 const LAUNCH_KIND_LABELS: Record<LaunchActionKind, string> = {
   spawn_process: "로컬 실행 파일 실행",
   third_party_app_launch: "서드파티 앱으로 실행",
-};
-
-const OVERRIDE_KIND_LABELS: Record<OverrideKind, string> = {
-  none: "원본 유지",
-  literal: "일괄 변경",
-  config_patch: "일부 변경",
 };
 
 function defaultNewRecipe(): Recipe {
@@ -105,6 +109,30 @@ function slugify(name: string): string {
   return (base || "app").slice(0, 64);
 }
 
+/** 압축 하나가 곧 옵션 하나(1:1) 모델의 정합성 복구 — 이전 버전 스키마나 수동
+ * `library.json` 편집으로 (a) archive/file 이 존재하지 않는 optional_group id를
+ * 가리키거나 (b) 아무도 안 가리키는 optional_groups 항목이 남아있으면, 편집 UI가
+ * "고아 상태"를 지울 방법 자체가 없어(체크박스가 소유 관계로만 생성/삭제를 유발)
+ * 조용히 영구 잔류한다(2026-08, 실사용 버그 리포트). 편집 다이얼로그를 여는
+ * 시점에 한 번 정규화해서, 열기만 해도 정합성이 복구되고 그대로 저장하면
+ * `library.json`도 같이 정리되게 한다. */
+function normalizeOptionalGroups(r: Recipe): Recipe {
+  const groupIds = new Set(r.optional_groups.map((g) => g.id));
+  const archives = r.archives.map((a) =>
+    a.optional_group && !groupIds.has(a.optional_group) ? { ...a, optional_group: null } : a,
+  );
+  const files = r.files.map((f) =>
+    f.optional_group && !groupIds.has(f.optional_group) ? { ...f, optional_group: null } : f,
+  );
+  const referencedIds = new Set(
+    [...archives.map((a) => a.optional_group), ...files.map((f) => f.optional_group)].filter(
+      (id): id is string => !!id,
+    ),
+  );
+  const optional_groups = r.optional_groups.filter((g) => referencedIds.has(g.id));
+  return { ...r, archives, files, optional_groups };
+}
+
 /** slugify 결과가 이미 라이브러리에 있으면 `-2`, `-3`... 붙여서 회피. */
 function uniqueId(base: string, existingIds: string[]): string {
   if (!existingIds.includes(base)) return base;
@@ -121,6 +149,54 @@ function moveItem<T>(items: T[], from: number, to: number): T[] {
   const [moved] = copy.splice(from, 1);
   copy.splice(to, 0, moved);
   return copy;
+}
+
+/** 경로 문자열 하나가 `from`(정확히 일치) 또는 `from` 밑(접두사 `${from}/`)이면
+ * `to` 기준으로 재작성, 아니면 그대로. */
+function rewritePath(path: string, from: string, to: string): string {
+  if (path === from) return to;
+  const prefix = `${from}/`;
+  return path.startsWith(prefix) ? to + path.slice(from.length) : path;
+}
+
+/** 목적지 트리에서 파일/폴더 하나를 옮기거나 이름을 바꿀 때(둘 다 "경로 접두사
+ * 일괄 재작성"이라는 같은 연산 — `to`가 다를 뿐) 호출 — 경로 문자열을 참조하는
+ * 모든 필드(`files`/`folder_rules`/`archives`의 `extract_to`·`path_overrides.to`/
+ * `launch.entry_point`)를 같이 갱신해야 정합성이 깨지지 않는다. */
+function moveTreePath(recipe: Recipe, from: string, to: string): Recipe {
+  const rewrite = (p: string) => rewritePath(p, from, to);
+  return {
+    ...recipe,
+    files: recipe.files.map((f) => ({ ...f, path: rewrite(f.path) })),
+    folder_rules: recipe.folder_rules.map((r) => ({ ...r, path: rewrite(r.path) })),
+    archives: recipe.archives.map((a) => ({
+      ...a,
+      extract_to: rewrite(a.extract_to),
+      path_overrides: (a.path_overrides ?? []).map((po) => ({ ...po, to: rewrite(po.to) })),
+    })),
+    launch:
+      recipe.launch.kind === "spawn_process"
+        ? { ...recipe.launch, entry_point: rewrite(recipe.launch.entry_point) }
+        : recipe.launch,
+  };
+}
+
+/** `from`(파일 또는 폴더) 밑의 선언을 복제해 `to` 밑에 새로 추가 — 원본은 그대로
+ * 둔다. `path_overrides`/`extract_to`/`entry_point`는 복제 대상이 아니다: 복제는
+ * 화이트리스트 선언(어떤 파일이 있는지)의 복제이지, 새 설치 규칙(어디서 받아 어디에
+ * 풀지)을 만드는 게 아니다. `optional_group`은 원본 그대로 유지 — 복제본도 같은
+ * 선택 그룹에 속한다. */
+function duplicateTreePath(recipe: Recipe, from: string, to: string): Recipe {
+  const prefix = `${from}/`;
+  const isUnder = (p: string) => p === from || p.startsWith(prefix);
+  const remap = (p: string) => (p === from ? to : to + p.slice(from.length));
+  const newFiles = recipe.files.filter((f) => isUnder(f.path)).map((f) => ({ ...f, path: remap(f.path) }));
+  const newRules = recipe.folder_rules.filter((r) => isUnder(r.path)).map((r) => ({ ...r, path: remap(r.path) }));
+  return {
+    ...recipe,
+    files: [...recipe.files, ...newFiles],
+    folder_rules: [...recipe.folder_rules, ...newRules],
+  };
 }
 
 /** `moveItem`으로 배열이 바뀐 뒤, 그 배열을 가리키던 선택 인덱스가 같은 항목을
@@ -203,10 +279,11 @@ function useDragReorder(onReorder: (from: number, to: number) => void) {
 
 export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Props) {
   const isNew = recipe === null;
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(true);
   // archives는 order 기준으로 한 번 정렬해서 시작 — 카드 목록의 배열 위치가 곧
   // 실행 순서라는 불변식을 처음부터 보장(그 뒤로는 renumberArchiveOrders가 유지).
   const [draft, setDraft] = useState<Recipe>(() => {
-    const initial = recipe ?? defaultNewRecipe();
+    const initial = normalizeOptionalGroups(recipe ?? defaultNewRecipe());
     return { ...initial, archives: [...initial.archives].sort((a, b) => a.order - b.order) };
   });
   const [saving, setSaving] = useState(false);
@@ -217,18 +294,32 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
   const [selectedArchiveIndex, setSelectedArchiveIndex] = useState<number | null>(() =>
     draft.archives.length > 0 ? 0 : null,
   );
-  const [selectedFileIndex, setSelectedFileIndex] = useState<number | null>(null);
-  // 목적지 트리에서 파일 선택과 폴더 선택은 서로 배타적 — 아래 편집 폼 자리 하나를
-  // 공유하므로 한쪽을 고르면 다른 쪽은 비운다.
-  const [selectedFolderPath, setSelectedFolderPath] = useState<string | null>(null);
-  const selectFile = (index: number) => {
-    setSelectedFileIndex(index);
-    setSelectedFolderPath(null);
+  // 목적지 트리의 다중 선택 — 키 형식은 `RecipeFileTree`의 `fileKey`/`folderKey`
+  // (`file:{index}`/`folder:{path}`) 그대로. 트리가 controlled 컴포넌트로 이 state를
+  // 읽고/쓰며(클릭/Ctrl+클릭/Shift+클릭/Ctrl+A), 오른쪽 편집 폼도 같은 state를 보고
+  // 0개/1개/여러 개 상태를 가른다.
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
+  const selectOnly = (key: string) => {
+    setSelectedKeys(new Set([key]));
+    setSelectionAnchor(key);
   };
-  const selectFolder = (path: string) => {
-    setSelectedFolderPath(path);
-    setSelectedFileIndex(null);
-  };
+  const selectedFileIndexes = useMemo(
+    () =>
+      [...selectedKeys]
+        .map(parseTreeKey)
+        .filter((k): k is { kind: "file"; index: number } => k.kind === "file")
+        .map((k) => k.index),
+    [selectedKeys],
+  );
+  const selectedFolderPaths = useMemo(
+    () =>
+      [...selectedKeys]
+        .map(parseTreeKey)
+        .filter((k): k is { kind: "folder"; path: string } => k.kind === "folder")
+        .map((k) => k.path),
+    [selectedKeys],
+  );
   // 폴더 옵션(FolderRuleMode) 복사/붙여넣기 — 여러 폴더에 같은 규칙을 반복 입력하지
   // 않도록. 선택된 폴더가 바뀌어도(심지어 잠깐 파일을 선택했다 돌아와도) 유지되도록
   // 부모(이 컴포넌트)가 들고 있는다 — `FolderRuleEditor` 로컬 state 면 그 폴더를
@@ -263,6 +354,21 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
       return { ...prev, folder_rules: mode ? [...rest, { path, mode }] : rest };
     });
   };
+
+  /** 여러 폴더를 한꺼번에 선택했을 때의 "규칙 붙여넣기" — `copiedFolderRule`을
+   * 선택된 폴더 전부에 동일하게 적용(각 폴더의 기존 규칙은 교체). */
+  const handleApplyFolderRuleToSelected = (paths: string[]) => {
+    if (!copiedFolderRule) return;
+    const pathSet = new Set(paths);
+    setDraft((prev) => ({
+      ...prev,
+      folder_rules: [
+        ...prev.folder_rules.filter((r) => !pathSet.has(r.path)),
+        ...paths.map((path) => ({ path, mode: copiedFolderRule })),
+      ],
+    }));
+  };
+
 
   /** 이미 압축을 풀어본 폴더(또는 이미 설치된 인스턴스 폴더)를 골라서, 그 안의 파일
    * 전부를 화이트리스트(`Recipe.files`)에 자동으로 채워넣는다 — 수백 개를 손으로
@@ -308,74 +414,129 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
   };
 
   const handleAddFileAt = (folderPath: string) => {
+    const newIndex = draft.files.length;
     const newFile: RecipeFile = { path: folderPath ? `${folderPath}/` : "", override_content: null };
     setDraft((prev) => ({ ...prev, files: [...prev.files, newFile] }));
-    selectFile(draft.files.length);
+    selectOnly(fileKey(newIndex));
   };
 
-  const handleRemoveFile = (index: number) => {
-    setDraft((prev) => ({ ...prev, files: prev.files.filter((_, i) => i !== index) }));
-    setSelectedFileIndex((cur) => {
-      if (cur === null || cur === index) return null;
-      return cur > index ? cur - 1 : cur;
-    });
+  /** 목적지 트리/오른쪽 편집 폼의 삭제를 전부 이걸로 통일 — 행의 ✕(단일 키 하나)든
+   * Delete 키/우클릭 메뉴의 다중 삭제(선택된 키 전부)든 항상 이 함수 하나만
+   * 호출한다. 파일 여러 개를 인덱스로 하나씩 반복 삭제하면 먼저 지운 항목 때문에
+   * 뒤 인덱스가 밀려 엉뚱한 항목이 지워지는 문제가 있어(index-shift 버그), 지울
+   * 대상 전체를 먼저 확정한 뒤 한 번의 필터로 처리한다. 폴더는 기존
+   * `handleRemoveFolder`와 같은 의미(그 경로 밑 전부 제거) — "폴더 비우기"(규칙은
+   * 남기고 내용만 비움)와는 다른 동작이라 별도로 `handleEmptyFolder`를 둔다. */
+  const handleRemoveKeys = (keys: Set<string>) => {
+    if (keys.size === 0) return;
+    const folderPaths: string[] = [];
+    const fileIndexesToRemove = new Set<number>();
+    for (const key of keys) {
+      const parsed = parseTreeKey(key);
+      if (parsed.kind === "folder") folderPaths.push(parsed.path);
+      else fileIndexesToRemove.add(parsed.index);
+    }
+    const isUnderRemovedFolder = (p: string) => folderPaths.some((fp) => p === fp || p.startsWith(`${fp}/`));
+    setDraft((prev) => ({
+      ...prev,
+      files: prev.files.filter((f, i) => !fileIndexesToRemove.has(i) && !isUnderRemovedFolder(f.path)),
+      folder_rules: prev.folder_rules.filter(
+        (r) => !folderPaths.includes(r.path) && !isUnderRemovedFolder(r.path),
+      ),
+    }));
+    setSelectedKeys(new Set());
+    setSelectionAnchor(null);
   };
 
-  /** "폴더 비우기"(선택된 폴더 편집 패널) — 그 아래 파일만 지우고 선택 상태는 그대로
-   * 둔다. 폴더 자체는 파일 경로 접두사로만 존재하는 파생 구조라(`buildFileTree`),
-   * 파일을 다 지우면 뭔가 다른 근거가 없는 한 트리에서도 사라진다 — 그래서 그 경로에
+  /** "폴더 비우기"(선택된 폴더 편집 패널) — 그 아래 파일만 지우고 폴더 자신의 선택
+   * 상태는 그대로 둔다(그 안에 있던 파일이 선택돼 있었다면 그 선택만 정리). 폴더
+   * 자체는 파일 경로 접두사로만 존재하는 파생 구조라(`buildFileTree`), 파일을 다
+   * 지우면 뭔가 다른 근거가 없는 한 트리에서도 사라진다 — 그래서 그 경로에
    * `folder_rules` 항목이 아직 없으면 "전체 허용"(`Passthrough`) 규칙을 하나 걸어
    * 폴더가 계속 보이게 한다. 나중에 이 폴더를 다시 채울 걸 전제로 비우는 동작이라,
    * 채워 넣을 때마다 화이트리스트에 일일이 등록하지 않아도 되는 쪽을 기본으로 둔다.
-   * 이미 규칙이 있으면 손대지 않는다. "폴더 제거"(트리 행의 ✕, 아래)와 다른 점은 이
-   * 규칙 유지뿐 — 나중에 다시 파일을 채울 폴더는 비우기, 아예 없앨 폴더는 제거를 쓴다. */
+   * 이미 규칙이 있으면 손대지 않는다. "폴더 제거"(`handleRemoveKeys`)와 다른 점은
+   * 이 규칙 유지뿐 — 나중에 다시 파일을 채울 폴더는 비우기, 아예 없앨 폴더는
+   * 제거를 쓴다. */
   const handleEmptyFolder = (path: string) => {
     const prefix = `${path}/`;
     const isUnderPath = (p: string) => p === path || p.startsWith(prefix);
-    const selectedPath =
-      selectedFileIndex !== null ? (draft.files[selectedFileIndex]?.path ?? null) : null;
-    // `newFiles`는 이 핸들러 안에서 딱 한 번만 draft를 건드리므로(다른 setDraft와
-    // 같은 이벤트에서 안 겹침) `draft`에서 직접 계산해도 안전 — setState 업데이터가
-    // 언제 실제로 실행되는지(React가 보장 안 함)에 기대지 않는다.
-    const newFiles = draft.files.filter((f) => !isUnderPath(f.path));
     const hasRule = draft.folder_rules.some((r) => r.path === path);
     setDraft((prev) => ({
       ...prev,
       files: prev.files.filter((f) => !isUnderPath(f.path)),
       folder_rules: hasRule
         ? prev.folder_rules
-        : [...prev.folder_rules, { path, mode: { kind: "passthrough" } }],
+        : [...prev.folder_rules, { path, mode: { kind: "passthrough", ask_on_conflict: false } }],
     }));
-    if (selectedPath !== null && !isUnderPath(selectedPath)) {
-      const newIndex = newFiles.findIndex((f) => f.path === selectedPath);
-      setSelectedFileIndex(newIndex >= 0 ? newIndex : null);
-    } else {
-      setSelectedFileIndex(null);
-    }
+    setSelectedKeys((prevKeys) => {
+      const next = new Set(prevKeys);
+      for (const key of prevKeys) {
+        const parsed = parseTreeKey(key);
+        if (parsed.kind === "file" && isUnderPath(draft.files[parsed.index]?.path ?? "")) {
+          next.delete(key);
+        }
+      }
+      return next;
+    });
   };
 
-  /** 폴더는 별도 엔티티가 아니라 `draft.files`의 경로 접두사로만 존재하는 파생
-   * 구조(`buildFileTree` 참고)라, "폴더 제거"는 실제로는 그 접두사 아래 파일 전부를
-   * 한 번에 제거하는 것과 같다. 그 폴더에 걸린 `folder_rules`도 이제 대상이 사라지니
-   * 같이 정리 — 안 지우면 저장된 규칙이 가리키는 폴더가 없는 채로 남는다. */
-  const handleRemoveFolder = (path: string) => {
-    const prefix = `${path}/`;
-    const isUnderRemoved = (p: string) => p === path || p.startsWith(prefix);
-    const selectedPath =
-      selectedFileIndex !== null ? (draft.files[selectedFileIndex]?.path ?? null) : null;
-    const newFiles = draft.files.filter((f) => !isUnderRemoved(f.path));
+  /** 목적지 트리의 드래그 이동/붙여넣기(잘라내기)/인라인 이름변경이 전부 이걸로
+   * 귀결된다 — 다중 선택 상태에서 여러 개를 한 번에 옮길 때도 항상 배열 하나로
+   * 이 함수를 한 번만 호출한다. `handleMovePath(a,b)`를 여러 번 반복 호출하면 각
+   * 호출이 "이 렌더 시점의" `draft` 스냅샷을 그대로 읽어서, 나중 호출이 앞선
+   * 호출의 변경을 덮어써버리는 문제가 있다(같은 동기 틱 안에서 `setDraft`가 즉시
+   * 반영되지 않으므로) — 그래서 배열 전체를 로컬 변수 위에서 순차적으로 접어(fold)
+   * 최종 결과 하나만 `setDraft`한다. "어디로 옮길지(`to`)"는 이미 유일성 검사까지
+   * 끝낸 채로 `RecipeFileTree`가 계산해서 넘겨준다(자기 자신/자기 하위로의 드롭
+   * 등 잘못된 이동 자체를 걸러내는 것도 그쪽 책임). */
+  const handleMoveMany = (moves: { from: string; to: string }[]) => {
+    if (moves.length === 0) return;
+    let next = draft;
+    for (const { from, to } of moves) {
+      next = moveTreePath(next, from, to);
+    }
+    setDraft(next);
+    // 파일은 배열 인덱스가 이동으로 안 바뀌므로(경로 문자열만 바뀜) 손댈 게 없고,
+    // 폴더는 키 자체가 경로를 담고 있으니 같은 재작성을 선택 키에도 적용한다.
+    const rewriteFolderKey = (key: string): string => {
+      const parsed = parseTreeKey(key);
+      if (parsed.kind !== "folder") return key;
+      let path = parsed.path;
+      for (const { from, to } of moves) path = rewritePath(path, from, to);
+      return folderKey(path);
+    };
+    setSelectedKeys((prevKeys) => new Set([...prevKeys].map(rewriteFolderKey)));
+    setSelectionAnchor((cur) => (cur !== null ? rewriteFolderKey(cur) : cur));
+  };
+
+  /** 붙여넣기(복사 모드) — `to`는 `handleMoveMany`와 마찬가지로 이미 유일성 검사가
+   * 끝난 경로들이고, 같은 이유(같은 틱 안 반복 호출의 stale draft 문제)로 배열
+   * 하나를 한 번에 접어 처리한다. 원본은 그대로 두고 새 선언만 추가하므로 선택
+   * 상태는 안 건드린다. */
+  const handleDuplicateMany = (pairs: { from: string; to: string }[]) => {
+    if (pairs.length === 0) return;
+    let next = draft;
+    for (const { from, to } of pairs) {
+      next = duplicateTreePath(next, from, to);
+    }
+    setDraft(next);
+  };
+
+  /** "새 폴더" — 파일 없이 `folder_rules`만으로 빈 폴더를 만든다(`handleEmptyFolder`가
+   * 이미 쓰는 것과 같은 메커니즘: `buildFileTree`의 `extraFolderPaths`가 이 규칙의
+   * 경로를 폴더 노드로 띄워줌). 실제로 만들어진 경로(이름 충돌 시 요청한 이름과
+   * 다를 수 있음)를 돌려줘서, 호출자(`RecipeFileTree`)가 그 자리에서 바로 인라인
+   * 이름변경을 시작하게 한다. */
+  const handleCreateFolder = (parentPath: string): string => {
+    const existing = collectExistingTreePaths(draft.files.map((f) => f.path), fileTree);
+    const path = uniqueTreePath(parentPath ? `${parentPath}/새 폴더` : "새 폴더", existing);
     setDraft((prev) => ({
       ...prev,
-      files: prev.files.filter((f) => !isUnderRemoved(f.path)),
-      folder_rules: prev.folder_rules.filter((r) => !isUnderRemoved(r.path)),
+      folder_rules: [...prev.folder_rules, { path, mode: { kind: "passthrough", ask_on_conflict: false } }],
     }));
-    if (selectedPath !== null && !isUnderRemoved(selectedPath)) {
-      const newIndex = newFiles.findIndex((f) => f.path === selectedPath);
-      setSelectedFileIndex(newIndex >= 0 ? newIndex : null);
-    } else {
-      setSelectedFileIndex(null);
-    }
-    setSelectedFolderPath((cur) => (cur !== null && isUnderRemoved(cur) ? null : cur));
+    selectOnly(folderKey(path));
+    return path;
   };
 
   // 압축을 등록하려면 애초에 컴퓨터에서 그 파일을 찾아야 한다 — URL을 먼저 적고
@@ -509,34 +670,38 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
       role="dialog"
       aria-modal="true"
       aria-labelledby="recipe-edit-title"
-      onClick={() => !saving && onCancel()}
     >
       <div
-        className="flex h-[85vh] w-full max-w-3xl flex-col rounded-lg border border-neutral-800 bg-neutral-900 shadow-2xl"
+        className="flex h-[85vh] w-full max-w-4xl flex-col rounded-lg border border-neutral-800 bg-neutral-900 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="recipe-edit-title" className="px-6 py-3 text-base font-semibold text-neutral-50">
+        <h3
+          id="recipe-edit-title"
+          className="px-6 py-3 text-base font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {isNew ? "새 앱 추가" : "앱 편집"}
         </h3>
 
-        <div className="flex min-h-0 flex-1 border-t border-neutral-800">
-          <nav className="w-36 shrink-0 space-y-1 overflow-y-auto border-r border-neutral-800 p-3">
-            {TAB_ORDER.map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setTab(t)}
-                className={`w-full cursor-pointer rounded px-2 py-1.5 text-left text-xs ${
-                  tab === t
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200"
-                }`}
-              >
-                {TAB_LABELS[t]}
-              </button>
-            ))}
-          </nav>
+        <nav className="flex shrink-0 gap-1 border-t border-b border-neutral-800 px-6 py-2">
+          {TAB_ORDER.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setTab(t)}
+              className={`cursor-pointer rounded px-3 py-1.5 text-left text-xs ${
+                tab === t
+                  ? "bg-neutral-800 text-neutral-100"
+                  : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200"
+              }`}
+            >
+              {TAB_LABELS[t]}
+            </button>
+          ))}
+        </nav>
 
+        <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 flex-1 flex-col p-6">
               {tab === "basic" && (
                 <div className="min-h-0 flex-1 space-y-4 overflow-y-auto">
@@ -572,10 +737,10 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
               )}
 
               {tab === "archives" && (
-                <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <div className="flex min-h-0 flex-1 gap-4">
                   <Field
                     label="압축 다운로드"
-                    className="shrink-0"
+                    className="flex min-h-0 w-1/2 flex-col"
                     action={
                       <button
                         type="button"
@@ -596,7 +761,7 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
                       onReorder={handleReorderArchive}
                     />
                   </Field>
-                  <div className="min-h-0 flex-1 overflow-y-auto">
+                  <div className="min-h-0 w-1/2 overflow-y-auto">
                     {selectedArchiveIndex !== null && draft.archives[selectedArchiveIndex] ? (
                       <ArchiveEditor
                         archive={draft.archives[selectedArchiveIndex]}
@@ -623,10 +788,10 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
               )}
 
               {tab === "files" && (
-                <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <div className="flex min-h-0 flex-1 gap-4">
                   <Field
                     label="목적지 트리"
-                    className="shrink-0"
+                    className="flex min-h-0 w-1/2 flex-col"
                     action={
                       <button
                         type="button"
@@ -642,46 +807,56 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
                       root={fileTree}
                       files={draft.files}
                       optionalGroups={draft.optional_groups}
-                      selectedIndex={selectedFileIndex}
-                      onSelect={selectFile}
-                      onAddAt={handleAddFileAt}
-                      onRemove={handleRemoveFile}
-                      onRemoveFolder={handleRemoveFolder}
                       folderRules={draft.folder_rules}
-                      selectedFolderPath={selectedFolderPath}
-                      onSelectFolder={selectFolder}
+                      selectedKeys={selectedKeys}
+                      selectionAnchor={selectionAnchor}
+                      onSelectionChange={(keys, anchor) => {
+                        setSelectedKeys(keys);
+                        setSelectionAnchor(anchor);
+                      }}
+                      onAddAt={handleAddFileAt}
+                      onDeleteSelected={() => handleRemoveKeys(selectedKeys)}
+                      onMove={handleMoveMany}
+                      onDuplicate={handleDuplicateMany}
+                      onCreateFolder={handleCreateFolder}
                     />
                   </Field>
-                  <div className="min-h-0 flex-1 overflow-y-auto">
-                    {selectedFileIndex !== null && draft.files[selectedFileIndex] ? (
-                      <Field label={`선택된 파일: ${draft.files[selectedFileIndex].path || "(경로 없음)"}`}>
+                  <div className="min-h-0 w-1/2 overflow-y-auto">
+                    {selectedKeys.size === 0 ? (
+                      <p className="text-xs text-neutral-500">
+                        트리에서 파일이나 폴더를 선택하면 여기에 편집 폼이 나타납니다.
+                      </p>
+                    ) : selectedKeys.size === 1 && selectedFileIndexes.length === 1 &&
+                      draft.files[selectedFileIndexes[0]] ? (
+                      <Field label={`선택된 파일: ${draft.files[selectedFileIndexes[0]].path || "(경로 없음)"}`}>
                         <RecipeFileEditor
-                          file={draft.files[selectedFileIndex]}
-                          onChange={(f) =>
+                          file={draft.files[selectedFileIndexes[0]]}
+                          onChange={(f) => {
+                            const index = selectedFileIndexes[0];
                             setDraft((prev) => ({
                               ...prev,
-                              files: prev.files.map((it, i) => (i === selectedFileIndex ? f : it)),
-                            }))
-                          }
-                          onRemove={() => handleRemoveFile(selectedFileIndex)}
+                              files: prev.files.map((it, i) => (i === index ? f : it)),
+                            }));
+                          }}
+                          onRemove={() => handleRemoveKeys(new Set([fileKey(selectedFileIndexes[0])]))}
                         />
                       </Field>
-                    ) : selectedFolderPath !== null ? (
+                    ) : selectedKeys.size === 1 && selectedFolderPaths.length === 1 ? (
                       <Field
-                        label={`선택된 폴더: ${selectedFolderPath}`}
+                        label={`선택된 폴더: ${selectedFolderPaths[0]}`}
                         action={
                           <div className="flex shrink-0 items-center gap-2">
                             <button
                               type="button"
                               disabled={importingFolder}
-                              onClick={() => void handleImportFolderAt(selectedFolderPath)}
+                              onClick={() => void handleImportFolderAt(selectedFolderPaths[0])}
                               className="cursor-pointer text-xs text-neutral-400 hover:text-neutral-200 disabled:opacity-50"
                             >
                               {importingFolder ? "불러오는 중..." : "여기로 폴더 불러오기"}
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleEmptyFolder(selectedFolderPath)}
+                              onClick={() => handleEmptyFolder(selectedFolderPaths[0])}
                               className="cursor-pointer text-xs text-neutral-400 hover:text-neutral-200"
                             >
                               폴더 비우기
@@ -690,15 +865,35 @@ export function RecipeEditDialog({ recipe, existingIds, onSave, onCancel }: Prop
                         }
                       >
                         <FolderRuleEditor
-                          mode={draft.folder_rules.find((r) => r.path === selectedFolderPath)?.mode ?? null}
-                          onChange={(mode) => handleFolderRuleChange(selectedFolderPath, mode)}
+                          mode={draft.folder_rules.find((r) => r.path === selectedFolderPaths[0])?.mode ?? null}
+                          onChange={(mode) => handleFolderRuleChange(selectedFolderPaths[0], mode)}
                           copiedRule={copiedFolderRule}
                           onCopy={setCopiedFolderRule}
                         />
                       </Field>
+                    ) : selectedFolderPaths.length === selectedKeys.size ? (
+                      // 여러 개 다 폴더 — 개별 편집 폼 대신 규칙 일괄 적용만.
+                      <div className="space-y-2">
+                        <p className="text-xs text-neutral-400">폴더 {selectedKeys.size}개 선택됨</p>
+                        <button
+                          type="button"
+                          disabled={!copiedFolderRule}
+                          onClick={() => handleApplyFolderRuleToSelected(selectedFolderPaths)}
+                          className="cursor-pointer rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 disabled:opacity-40"
+                        >
+                          규칙 붙여넣기(폴더 하나를 먼저 선택해 "규칙 복사"로 복사해둔 값)
+                        </button>
+                      </div>
+                    ) : selectedFileIndexes.length === selectedKeys.size ? (
+                      // 여러 개 다 파일 — 같은 내용을 가진 파일이 있는 경우가 거의
+                      // 없어 일괄 내용 적용은 의미가 없다(폴더 규칙과 달리). 개별
+                      // 선택해서 편집.
+                      <p className="text-xs text-neutral-400">
+                        파일 {selectedKeys.size}개 선택됨 — 삭제/잘라내기/복사만 가능합니다.
+                      </p>
                     ) : (
-                      <p className="text-xs text-neutral-500">
-                        트리에서 파일이나 폴더를 선택하면 여기에 편집 폼이 나타납니다.
+                      <p className="text-xs text-neutral-400">
+                        {selectedKeys.size}개 항목 선택됨(파일+폴더 혼합) — 삭제/잘라내기/복사만 가능합니다.
                       </p>
                     )}
                   </div>
@@ -852,7 +1047,7 @@ function ArchiveCardList({
       ref={drag.containerRef}
       onDragOver={drag.handleContainerDragOver}
       onDrop={drag.handleDrop}
-      className="max-h-[20vh] space-y-2 overflow-y-auto rounded border border-neutral-800 bg-neutral-950/40 p-2"
+      className="min-h-0 flex-1 space-y-2 overflow-y-auto rounded border border-neutral-800 bg-neutral-950/40 p-2"
     >
       {archives.length === 0 && (
         <p className="px-1 py-2 text-xs text-neutral-500">아직 압축이 없습니다.</p>
@@ -866,7 +1061,7 @@ function ArchiveCardList({
             onDragOver={(e) => drag.handleCardDragOver(i, e)}
             onDragEnd={drag.handleDragEnd}
             onClick={() => onSelect(i)}
-            className={`group relative select-none cursor-grab rounded border p-2 text-xs active:cursor-grabbing ${
+            className={`group relative select-none rounded border p-2 text-xs ${
               selectedIndex === i
                 ? "border-neutral-600 bg-neutral-800 text-neutral-100"
                 : "border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
@@ -975,6 +1170,7 @@ function ArchiveEditor({
               onPick={(extract_to) => onChange({ ...archive, extract_to })}
               extraFolderPaths={folderRules.map((r) => r.path)}
             />
+            <ClearFieldButton value={archive.extract_to} onClear={() => onChange({ ...archive, extract_to: "" })} />
           </div>
         </div>
       </Field>
@@ -1080,24 +1276,28 @@ function PathOverrideEditor({
   onRemove: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
-      <div className="min-w-0 flex-1">
+    <div className="space-y-2">
+      <Field label="압축 안 경로" action={<RemoveButton onClick={onRemove} />}>
         <TextInput
           value={override.from}
-          placeholder="압축 안 경로 — 파일 하나(Playing1.opi) 또는 폴더 통째(A)"
+          placeholder="파일 하나(asset1.dat), 폴더 내용만(A/), 폴더 통째(A)"
           onChange={(from) => onChange({ ...override, from })}
         />
-      </div>
-      <div className="min-w-0 flex-1">
-        <TextInput
-          value={override.to}
-          placeholder="보낼 위치 (폴더면 그 밑 구조 유지, 비우면 루트)"
-          readOnly
-          onChange={(to) => onChange({ ...override, to })}
-        />
-      </div>
-      <DestinationPathPicker files={files} mode="file" onPick={(to) => onChange({ ...override, to })} />
-      <RemoveButton onClick={onRemove} />
+      </Field>
+      <Field label="보낼 위치">
+        <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <TextInput
+              value={override.to}
+              placeholder="폴더면 그 밑 구조 유지, 비우면 루트"
+              readOnly
+              onChange={(to) => onChange({ ...override, to })}
+            />
+          </div>
+          <DestinationPathPicker files={files} mode="file" onPick={(to) => onChange({ ...override, to })} />
+          <ClearFieldButton value={override.to} onClear={() => onChange({ ...override, to: "" })} />
+        </div>
+      </Field>
     </div>
   );
 }
@@ -1151,223 +1351,6 @@ function ArtifactVerificationFields({ onChange }: { onChange: (v: ArtifactVerifi
 // ---------------------------------------------------------------------------
 
 
-/** 트리 한 행 — 폴더 또는 파일. `flattenVisibleTreeRows`가 만드는 평평한 배열의 원소. */
-interface TreeRow {
-  key: string;
-  depth: number;
-  data: { kind: "folder"; folder: FileTreeFolder } | { kind: "file"; name: string; index: number };
-}
-
-/** 트리를 지금 펼쳐진 상태(`collapsed`) 기준으로 "실제로 보이는 행"만 평평한 배열로
- * 만든다 — 이 배열에 `useVirtualizer`(아래 `ListEditor`와 같은 패턴)를 적용해 화면에
- * 실제 보이는 몇십 개 행만 DOM에 그린다. 수백~수천 개 파일이 있는 레시피(예: 대용량
- * 모드팩)에서 트리 전체를 그대로 그리면, 파일 하나만 지워도 그 많은 노드를 전부
- * 재조정해야 해서 눈에 띄게 느려짐 — 실사용 중 발견. 펼침/접힘 상태를 폴더별 컴포넌트
- * 로컬 state 대신 `FileTreeView`가 경로 집합으로 들고 있는 이유도 이 평탄화 때문 —
- * 컴포넌트 트리 밖에서 "지금 뭐가 보이는가"를 알아야 배열을 만들 수 있다. */
-function flattenVisibleTreeRows(folder: FileTreeFolder, collapsed: Set<string>, depth = 0): TreeRow[] {
-  const sortedFolders = Array.from(folder.folders.values()).sort((a, b) => a.name.localeCompare(b.name));
-  const sortedFiles = [...folder.files].sort((a, b) => a.name.localeCompare(b.name));
-  const rows: TreeRow[] = [];
-  for (const f of sortedFolders) {
-    rows.push({ key: `folder:${f.path}`, depth, data: { kind: "folder", folder: f } });
-    if (!collapsed.has(f.path)) {
-      rows.push(...flattenVisibleTreeRows(f, collapsed, depth + 1));
-    }
-  }
-  for (const file of sortedFiles) {
-    rows.push({ key: `file:${file.index}`, depth, data: { kind: "file", name: file.name, index: file.index } });
-  }
-  return rows;
-}
-
-const TREE_ROW_HEIGHT = 22;
-
-function FileTreeView({
-  root,
-  files,
-  optionalGroups,
-  selectedIndex,
-  onSelect,
-  onAddAt,
-  onRemove,
-  onRemoveFolder,
-  folderRules,
-  selectedFolderPath,
-  onSelectFolder,
-}: {
-  root: FileTreeFolder;
-  files: RecipeFile[];
-  optionalGroups: OptionalGroup[];
-  selectedIndex: number | null;
-  onSelect: (index: number) => void;
-  onAddAt: (folderPath: string) => void;
-  onRemove: (index: number) => void;
-  onRemoveFolder: (path: string) => void;
-  folderRules: FolderRule[];
-  selectedFolderPath: string | null;
-  onSelectFolder: (path: string) => void;
-}) {
-  // 접힌 폴더의 경로 집합 — 없으면(기본) 펼쳐진 것으로 취급. `root`(트리 자체)는
-  // 파일이 바뀔 때마다 새로 만들어지지만 경로 문자열은 안정적이라 이 state는
-  // 그 사이에도 그대로 유지된다(수정 중 펼침 상태가 안 흐트러짐).
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const toggleCollapsed = (path: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  };
-
-  const rows = useMemo(() => flattenVisibleTreeRows(root, collapsed), [root, collapsed]);
-  const isEmpty = rows.length === 0;
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => TREE_ROW_HEIGHT,
-    overscan: 12,
-  });
-
-  return (
-    <div className="rounded border border-neutral-800 bg-neutral-950/40 p-2">
-      {isEmpty && <p className="px-1 py-2 text-xs text-neutral-500">아직 파일이 없습니다.</p>}
-      {!isEmpty && (
-        <div ref={scrollRef} className="max-h-[20vh] overflow-y-auto">
-          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-            {virtualizer.getVirtualItems().map((virtualRow) => {
-              const row = rows[virtualRow.index];
-              const data = row.data;
-              return (
-                <div
-                  key={row.key}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: TREE_ROW_HEIGHT,
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                >
-                  {data.kind === "folder" ? (
-                    <FolderRow
-                      folder={data.folder}
-                      depth={row.depth}
-                      expanded={!collapsed.has(data.folder.path)}
-                      onToggleExpanded={() => toggleCollapsed(data.folder.path)}
-                      rule={folderRules.find((r) => r.path === data.folder.path)}
-                      selected={selectedFolderPath === data.folder.path}
-                      onSelectFolder={onSelectFolder}
-                      onAddAt={onAddAt}
-                      onRemoveFolder={onRemoveFolder}
-                    />
-                  ) : (
-                    <FileLeaf
-                      name={data.name}
-                      index={data.index}
-                      file={files[data.index]}
-                      optionalGroups={optionalGroups}
-                      depth={row.depth}
-                      selected={selectedIndex === data.index}
-                      onSelect={onSelect}
-                      onRemove={onRemove}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-      <button
-        type="button"
-        onClick={() => onAddAt("")}
-        className="mt-1 cursor-pointer px-1 text-xs text-neutral-400 hover:text-neutral-200"
-      >
-        + 새 파일 추가(루트)
-      </button>
-    </div>
-  );
-}
-
-function FolderRow({
-  folder,
-  depth,
-  expanded,
-  onToggleExpanded,
-  rule,
-  selected,
-  onSelectFolder,
-  onAddAt,
-  onRemoveFolder,
-}: {
-  folder: FileTreeFolder;
-  depth: number;
-  expanded: boolean;
-  onToggleExpanded: () => void;
-  rule: FolderRule | undefined;
-  selected: boolean;
-  onSelectFolder: (path: string) => void;
-  onAddAt: (folderPath: string) => void;
-  onRemoveFolder: (path: string) => void;
-}) {
-  return (
-    <div
-      className={`group flex h-full items-center gap-1 rounded px-1 ${
-        selected ? "bg-neutral-800" : "hover:bg-neutral-800/50"
-      }`}
-      style={{ paddingLeft: depth * 14 }}
-    >
-      <button
-        type="button"
-        onClick={onToggleExpanded}
-        className="w-4 shrink-0 cursor-pointer text-neutral-500"
-      >
-        {expanded ? "▾" : "▸"}
-      </button>
-      <button
-        type="button"
-        onClick={() => onSelectFolder(folder.path)}
-        className={`flex-1 cursor-pointer truncate text-left text-xs ${
-          selected ? "text-neutral-100" : "text-neutral-300"
-        }`}
-      >
-        📁 {folder.name}
-      </button>
-      {rule && (
-        <span className="shrink-0 whitespace-nowrap rounded bg-neutral-100 px-1 text-[10px] font-medium text-neutral-900 group-hover:hidden">
-          {folderRuleBadgeLabel(rule.mode)}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={() => onAddAt(folder.path)}
-        className="hidden shrink-0 cursor-pointer px-1 text-[11px] text-neutral-500 hover:text-neutral-200 group-hover:inline"
-        title="여기에 새 파일 추가"
-      >
-        +
-      </button>
-      <button
-        type="button"
-        onClick={() => onRemoveFolder(folder.path)}
-        className="hidden shrink-0 cursor-pointer px-1 text-red-300 hover:text-red-200 group-hover:inline"
-        title="이 폴더와 안의 파일 전부 제거"
-        aria-label="폴더 제거"
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
-
-function folderRuleBadgeLabel(mode: FolderRuleMode): string {
-  return mode.kind === "passthrough" ? "전체 허용" : "필터링";
-}
-
 function FolderRuleEditor({
   mode,
   onChange,
@@ -1386,18 +1369,21 @@ function FolderRuleEditor({
   const kind: "filtered" | "passthrough" = mode?.kind === "passthrough" ? "passthrough" : "filtered";
   const patterns = mode?.kind === "filtered" ? mode.patterns : [];
   const disallowPatterns = mode?.kind === "filtered" ? mode.disallow_patterns : [];
+  const askOnConflict = mode?.kind === "passthrough" ? mode.ask_on_conflict : false;
   // 지금 화면에 보이는 그대로(규칙 없음이어도 필터링 빈 값과 동일하게 취급)를
   // 복사한다 — mode 를 그대로 복사하면 "규칙 없음"(null)을 복사하는 셈이 돼 붙여넣기
   // 대상이 뭘 받는지 불분명해진다.
   const effectiveMode: FolderRuleMode =
-    kind === "passthrough" ? { kind: "passthrough" } : { kind: "filtered", patterns, disallow_patterns: disallowPatterns };
+    kind === "passthrough"
+      ? { kind: "passthrough", ask_on_conflict: askOnConflict }
+      : { kind: "filtered", patterns, disallow_patterns: disallowPatterns };
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <Select
           value={kind}
           onChange={(k) => {
-            if (k === "passthrough") onChange({ kind: "passthrough" });
+            if (k === "passthrough") onChange({ kind: "passthrough", ask_on_conflict: false });
             else onChange({ kind: "filtered", patterns, disallow_patterns: disallowPatterns });
           }}
           options={[
@@ -1416,11 +1402,22 @@ function FolderRuleEditor({
           type="button"
           disabled={!copiedRule}
           onClick={() => copiedRule && onChange(copiedRule)}
-          className="shrink-0 cursor-pointer text-xs text-neutral-400 hover:text-neutral-200 disabled:cursor-not-allowed disabled:opacity-40"
+          className="shrink-0 cursor-pointer text-xs text-neutral-400 hover:text-neutral-200 disabled:opacity-40"
         >
           규칙 붙여넣기
         </button>
       </div>
+      {kind === "passthrough" && (
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-neutral-300">
+          <input
+            type="checkbox"
+            className="cursor-pointer"
+            checked={askOnConflict}
+            onChange={(e) => onChange({ kind: "passthrough", ask_on_conflict: e.target.checked })}
+          />
+          압축 해제 중 이름은 같고 내용이 다른 기존 파일과 부딪히면 확인받기
+        </label>
+      )}
       {kind === "filtered" && (
         <>
           <Field label="허용 (이 폴더 기준 상대 글롭)">
@@ -1493,67 +1490,6 @@ function PatternListEditor({
   );
 }
 
-function FileLeaf({
-  name,
-  index,
-  file,
-  optionalGroups,
-  depth,
-  selected,
-  onSelect,
-  onRemove,
-}: {
-  name: string;
-  index: number;
-  file: RecipeFile;
-  optionalGroups: OptionalGroup[];
-  depth: number;
-  selected: boolean;
-  onSelect: (index: number) => void;
-  onRemove: (index: number) => void;
-}) {
-  const groupLabel = file.optional_group
-    ? (optionalGroups.find((g) => g.id === file.optional_group)?.label ?? file.optional_group)
-    : null;
-  const contentLabel = file.override_content ? OVERRIDE_KIND_LABELS[file.override_content.kind] : null;
-  return (
-    <div
-      className={`group flex h-full items-center gap-1 rounded px-1 text-xs ${
-        selected
-          ? "bg-neutral-800 text-neutral-100"
-          : "text-neutral-400 hover:bg-neutral-800/50 hover:text-neutral-200"
-      }`}
-      style={{ paddingLeft: depth * 14 + 20 }}
-    >
-      <button
-        type="button"
-        onClick={() => onSelect(index)}
-        className="flex-1 cursor-pointer truncate text-left"
-      >
-        📄 {name || "(이름 없음)"}
-      </button>
-      {groupLabel && (
-        <span className="shrink-0 whitespace-nowrap rounded bg-neutral-100 px-1 text-[10px] font-medium text-neutral-900 group-hover:hidden">
-          {groupLabel}
-        </span>
-      )}
-      {contentLabel && (
-        <span className="shrink-0 whitespace-nowrap rounded bg-neutral-100 px-1 text-[10px] font-medium text-neutral-900 group-hover:hidden">
-          {contentLabel}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={() => onRemove(index)}
-        className="hidden shrink-0 cursor-pointer text-red-300 hover:text-red-200 group-hover:inline"
-        aria-label="삭제"
-      >
-        ✕
-      </button>
-    </div>
-  );
-}
-
 /** 설치 조건(`optional_group`)은 여기서 편집 안 한다 — 압축 하나가 곧 옵션 하나이고
  * (2026-08, 사용자 확인), 이 화면이 다루는 화이트리스트 파일은 그 압축이 목적지
  * 폴더를 통째로 소유하는 구조상 이미 압축 선택 여부에 자동으로 딸려간다. 압축과
@@ -1569,7 +1505,7 @@ function RecipeFileEditor({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-2">
         <RemoveButton onClick={onRemove} />
       </div>
       <Field label="경로">
@@ -1599,32 +1535,23 @@ function OverrideContentFields({
   const kind: OverrideKind = content?.kind ?? "none";
   return (
     <div className="space-y-2">
-      <Field label="지정 방식">
-        <Select
-          value={kind}
-          onChange={(k) => {
-            if (k === "none") onChange(null);
-            else if (k === "literal") onChange({ kind: "literal", content: { encoding: "text", content: "" } });
-            else onChange({ kind: "config_patch", format: "ini", patch: {} });
-          }}
-          options={(Object.keys(OVERRIDE_KIND_LABELS) as OverrideKind[]).map((k) => ({
-            value: k,
-            label: OVERRIDE_KIND_LABELS[k],
-          }))}
+      <label className="flex cursor-pointer items-center gap-2 text-sm text-neutral-200">
+        <input
+          type="checkbox"
+          className="cursor-pointer"
+          checked={kind === "literal"}
+          onChange={(e) =>
+            onChange(
+              e.target.checked ? { kind: "literal", content: { encoding: "text", content: "" } } : null,
+            )
+          }
         />
-      </Field>
+        일괄 변경(파일 전체 내용 지정) — 끄면 원본 유지
+      </label>
       {content?.kind === "literal" && (
         <FileContentFields
           content={content.content}
           onChange={(c) => onChange({ kind: "literal", content: c })}
-        />
-      )}
-      {content?.kind === "config_patch" && (
-        <ConfigPatchFields
-          format={content.format}
-          patch={content.patch}
-          onFormatChange={(format) => onChange({ kind: "config_patch", format, patch: content.patch })}
-          onPatchChange={(patch) => onChange({ kind: "config_patch", format: content.format, patch })}
         />
       )}
     </div>
@@ -1638,89 +1565,29 @@ function FileContentFields({
   content: FileContent;
   onChange: (c: FileContent) => void;
 }) {
-  return (
-    <div className="space-y-2">
-      <Field label="인코딩">
-        <Select
-          value={content.encoding}
-          onChange={(encoding) =>
-            onChange(
-              encoding === "text" ? { encoding: "text", content: "" } : { encoding: "base64", data: "" },
-            )
-          }
-          options={[
-            { value: "text", label: "텍스트" },
-            { value: "base64", label: "base64 (바이너리)" },
-          ]}
-        />
-      </Field>
-      <Field label="내용">
-        {content.encoding === "text" ? (
-          <textarea
-            className={`${inputClass} min-h-[80px] font-mono text-xs`}
-            value={content.content}
-            onChange={(e) => onChange({ encoding: "text", content: e.target.value })}
-          />
-        ) : (
-          <textarea
-            className={`${inputClass} min-h-[80px] font-mono text-xs`}
-            value={content.data}
-            placeholder="base64 문자열"
-            onChange={(e) => onChange({ encoding: "base64", data: e.target.value })}
-          />
-        )}
-      </Field>
-    </div>
-  );
-}
-
-/** ini/json/toml 공통 — patch 는 항상 JSON(포맷 무관). ini/toml 은
- * `{"섹션": {"키": 값}}`, json 은 파일 최상위 구조 그 자체. 직접 손으로 JSON 을 쓰거나,
- * 이미 갖고 있는 설정 파일을 "파일에서 불러오기"로 통째로 채워 넣을 수 있다(예: 직접
- * 쓰던 option.ini) — 이 값은 레시피 자체에 실려 공유된다. */
-function ConfigPatchFields({
-  format,
-  patch,
-  onFormatChange,
-  onPatchChange,
-}: {
-  format: ConfigFileFormat;
-  patch: ConfigPatch;
-  onFormatChange: (f: ConfigFileFormat) => void;
-  onPatchChange: (p: ConfigPatch) => void;
-}) {
-  const [text, setText] = useState(() => JSON.stringify(patch, null, 2));
-  const [parseError, setParseError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
 
-  // patch 가 외부에서 바뀌면(불러오기 성공 등) textarea 도 동기화.
-  useEffect(() => {
-    setText(JSON.stringify(patch, null, 2));
-  }, [patch]);
-
-  const handleTextChange = (v: string) => {
-    setText(v);
-    try {
-      const parsed = JSON.parse(v) as ConfigPatch;
-      setParseError(null);
-      onPatchChange(parsed);
-    } catch (e) {
-      setParseError(String(e));
-    }
-  };
-
+  // 리터럴 override는 텍스트 전용(2026-08 보안 강화로 base64/바이너리 제거 —
+  // 검증 안 되는 리터럴로 실행 파일을 갈아치울 수 있던 통로). 파일에서 불러올 때
+  // UTF-8이 아니면 여기서 명확히 에러 — 몰래 깨진 문자로 채우지 않는다(`fatal: true`).
   const handleImport = async () => {
     setImportError(null);
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const picked = await open({ multiple: false, title: "불러올 설정 파일 선택" });
+      const picked = await open({ multiple: false, title: "불러올 파일 선택" });
       if (!picked || typeof picked !== "string") return;
       setImporting(true);
-      const imported = await readConfigFileAsPatch(picked, format);
-      onPatchChange(imported);
+      const data = await readFileBase64(picked);
+      const bytes = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      onChange({ encoding: "text", content: text });
     } catch (e) {
-      setImportError(String(e));
+      setImportError(
+        e instanceof Error && e.name === "TypeError"
+          ? "이 파일은 텍스트가 아니라 리터럴 override로 담을 수 없습니다(바이너리 자산은 압축 다운로드로만 설치 가능)"
+          : String(e),
+      );
     } finally {
       setImporting(false);
     }
@@ -1728,40 +1595,27 @@ function ConfigPatchFields({
 
   return (
     <div className="space-y-2">
-      <Field label="설정 파일 형식">
-        <Select
-          value={format}
-          onChange={(f) => onFormatChange(f as ConfigFileFormat)}
-          options={[
-            { value: "ini", label: "ini" },
-            { value: "json", label: "json" },
-            { value: "toml", label: "toml" },
-          ]}
-        />
-      </Field>
-      <Button
-        type="button"
-        size="sm"
-        variant="outline"
-        disabled={importing}
-        onClick={() => void handleImport()}
-        className="cursor-pointer"
-      >
-        {importing ? "불러오는 중..." : "파일에서 불러오기"}
-      </Button>
-      {importError && (
-        <p className="break-all text-[11px] text-red-300">불러오기 실패: {importError}</p>
-      )}
-      <Field label="변경할 값">
-        <p className="text-[11px] text-neutral-500">
-          패치 값(JSON) — ini/toml은 <code>{"{ \"섹션\": { \"키\": \"값\" } }"}</code> 형태
-        </p>
-        <textarea
-          className={`${inputClass} min-h-[100px] font-mono text-xs`}
-          value={text}
-          onChange={(e) => handleTextChange(e.target.value)}
-        />
-        {parseError && <p className="text-[11px] text-red-300">JSON 형식 오류: {parseError}</p>}
+      <Field label="내용">
+        <div className="space-y-2">
+          <textarea
+            className={`${inputClass} min-h-[80px] font-mono text-xs`}
+            value={content.content}
+            onChange={(e) => onChange({ encoding: "text", content: e.target.value })}
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={importing}
+            onClick={() => void handleImport()}
+            className="cursor-pointer"
+          >
+            {importing ? "불러오는 중..." : "파일에서 불러오기"}
+          </Button>
+          {importError && (
+            <p className="break-all text-[11px] text-red-300">불러오기 실패: {importError}</p>
+          )}
+        </div>
       </Field>
     </div>
   );
@@ -1829,6 +1683,7 @@ function LaunchActionFields({
               onPick={(entry_point) => onChange({ ...launch, entry_point })}
               extraFolderPaths={folderRules.map((r) => r.path)}
             />
+            <ClearFieldButton value={launch.entry_point} onClear={() => onChange({ ...launch, entry_point: "" })} />
           </div>
         </Field>
         <Field label="실행 인자 (쉼표로 구분, 선택)">

@@ -18,11 +18,12 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
+import { formatBytes } from "@/lib/utils";
 import { useConfirmDialog } from "@/components/ui/confirm-dialog";
 import { InstallDiffDialog } from "@/components/InstallDiffDialog";
 import { isServiceRunning, stopServer } from "@/lib/api";
 import { libraryInstallStatus, libraryStageManualArchiveFile } from "@/lib/library";
-import type { ArtifactVerification, InstallStatus, Recipe } from "@/lib/library";
+import type { ArtifactVerification, InstallStatus, RecipeSummary } from "@/lib/library";
 
 // `commands/library.rs::reconcile_install` 이 emit 하는 `install:*` 이벤트 페이로드.
 // 백엔드는 `serde_json::json!`(타입 없이 camelCase 키)로 직접 만들어 보내므로 프론트
@@ -80,13 +81,6 @@ function shortLabel(label: string): string {
   return parts[parts.length - 1] ?? label;
 }
 
-function formatBytes(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}GB`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(0)}MB`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}KB`;
-  return `${n}B`;
-}
-
 function formatSpeed(bytesPerSec: number): string {
   return `${formatBytes(bytesPerSec)}/s`;
 }
@@ -128,15 +122,15 @@ function progressPercent(p: InstallProgress): number | null {
 }
 
 interface Props {
-  recipe: Recipe;
+  recipe: RecipeSummary;
   /** "설치" 버튼 — 처음 설치든 이미 설치된 레시피의 변경분 반영("업데이트")이든
    * 지금 레시피와 다른 부분만 적용하는 같은 동작이라 버튼도 콜백도 하나뿐이다.
    * 설치 상태가 실제 레시피와 다르면 뱃지("업데이트 필요")로 알려준다. */
-  onInstall: (recipe: Recipe) => void;
+  onInstall: (recipe: RecipeSummary) => void;
   installing: boolean;
   /** 설치 진행 중에만 진행 바 옆에 "취소" 버튼으로 노출. */
-  onCancelInstall?: (recipe: Recipe) => void;
-  onLaunch: (recipe: Recipe) => void;
+  onCancelInstall?: (recipe: RecipeSummary) => void;
+  onLaunch: (recipe: RecipeSummary) => void;
   launching: boolean;
   onRemove?: () => Promise<void>;
   /** 설치된 데이터(대상 폴더 + 마커)만 삭제 — 라이브러리 항목은 남는다. `onRemove`와
@@ -264,7 +258,7 @@ export function AppCard({
     let cancelled = false;
     (async () => {
       try {
-        const status = await libraryInstallStatus(recipe);
+        const status = await libraryInstallStatus(recipe.id);
         if (!cancelled) setInstallStatus(status);
       } catch {
         if (!cancelled) setInstallStatus(null);
@@ -525,7 +519,7 @@ export function AppCard({
                 type="button"
                 disabled={stagingManualFile}
                 onClick={() => void handleSelectManualFile()}
-                className="shrink-0 cursor-pointer text-xs text-neutral-500 underline-offset-2 hover:text-neutral-200 hover:underline disabled:cursor-not-allowed"
+                className="shrink-0 cursor-pointer text-xs text-neutral-500 underline-offset-2 hover:text-neutral-200 hover:underline"
               >
                 {stagingManualFile ? "확인 중..." : "직접 파일 선택"}
               </button>
@@ -587,7 +581,7 @@ export function AppCard({
             variant="outline"
             disabled={stopping}
             onClick={() => void handleStop()}
-            className="min-w-[90px] cursor-pointer border-red-700/60 text-red-200 hover:bg-red-950/40 disabled:cursor-not-allowed"
+            className="min-w-[90px] cursor-pointer border-red-700/60 text-red-200 hover:bg-red-950/40"
           >
             {stopping ? (
               <span className="inline-flex items-center gap-1.5">
@@ -607,7 +601,7 @@ export function AppCard({
             // 카드 배경 이미지가 비치지 않도록 — 기본 outline variant는
             // 다크모드에서 `bg-input/30`(반투명)이라 배경이 있는 카드에선 버튼이
             // 배경에 비쳐 보인다.
-            className="cursor-pointer border-neutral-700 bg-neutral-800 hover:bg-neutral-700 disabled:cursor-not-allowed dark:bg-neutral-800 dark:hover:bg-neutral-700"
+            className="cursor-pointer border-neutral-700 bg-neutral-800 hover:bg-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
           >
             {installing ? (
               <span className="inline-flex items-center gap-1.5">
@@ -625,7 +619,7 @@ export function AppCard({
             size="sm"
             disabled={launching}
             onClick={() => onLaunch(recipe)}
-            className="min-w-[70px] cursor-pointer shadow-sm transition-all hover:shadow-md hover:brightness-110 hover:scale-[1.04] active:scale-[0.96] disabled:cursor-not-allowed"
+            className="min-w-[70px] cursor-pointer shadow-sm transition-all hover:shadow-md hover:brightness-110 hover:scale-[1.04] active:scale-[0.96]"
           >
             {launching ? (
               <span className="inline-flex items-center gap-1.5">

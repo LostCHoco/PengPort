@@ -88,3 +88,22 @@ export function RemoveButton({ onClick }: { onClick: () => void }) {
     </button>
   );
 }
+
+/** `readOnly` + "찾아보기" 피커로만 채워지는 경로 필드(예: `extract_to`,
+ * `path_overrides.to`, `entry_point`) 옆에 두는 값 초기화 버튼 — 피커는 트리에
+ * 이미 선언된 값만 고를 수 있어, 값이 잘못 꼬였을 때 되돌릴 방법이 이것뿐이다.
+ * 값이 비어있으면 지울 게 없으니 렌더링 자체를 생략. */
+export function ClearFieldButton({ value, onClear }: { value: string; onClear: () => void }) {
+  if (!value) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      className="shrink-0 cursor-pointer rounded px-1.5 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+      aria-label="지우기"
+      title="지우기"
+    >
+      지우기
+    </button>
+  );
+}

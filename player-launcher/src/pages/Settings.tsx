@@ -325,7 +325,7 @@ function ResetCard() {
               size="sm"
               disabled={!allowConfirm}
               onClick={onConfirm}
-              className="cursor-pointer bg-red-700 hover:bg-red-600 disabled:cursor-not-allowed"
+              className="cursor-pointer bg-red-700 hover:bg-red-600"
             >
               실행
             </Button>

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
 import { downloadThirdPartyApp, listThirdPartyApps } from "@/lib/api";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** 설치 대상 third-party app id — null 이면 다이얼로그 닫힘. */
@@ -26,6 +27,7 @@ export function ThirdPartyInstallDialog({ appId, onInstalled, onCancel }: Props)
   const cardRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "ask" });
   const [label, setLabel] = useState<string | null>(null);
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(open);
 
   useEffect(() => {
     if (open) setPhase({ kind: "ask" });
@@ -69,15 +71,10 @@ export function ThirdPartyInstallDialog({ appId, onInstalled, onCancel }: Props)
     }
   };
 
-  const handleBackdrop = () => {
-    if (phase.kind !== "downloading") onCancel();
-  };
-
   return (
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={handleBackdrop}
       role="dialog"
       aria-modal="true"
       aria-labelledby="tp-install-title"
@@ -85,9 +82,14 @@ export function ThirdPartyInstallDialog({ appId, onInstalled, onCancel }: Props)
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="tp-install-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="tp-install-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {label ?? appId} 가 필요합니다
         </h3>
 

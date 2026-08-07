@@ -4,7 +4,6 @@
 //! 명명 규칙: `{동사}_{명사}` (snake_case) — 예: `fetch_meta`, `sync_instance`.
 
 pub mod browser_download;
-pub mod config_patch;
 pub mod file_import;
 pub mod library;
 pub mod maintenance;

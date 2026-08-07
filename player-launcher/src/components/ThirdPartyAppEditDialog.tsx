@@ -16,6 +16,7 @@ import { Field, RemoveButton, Select, TextInput } from "@/components/ui/form-fie
 import { DestinationPathPicker } from "@/components/ui/file-tree-picker";
 import { scanFolderRelativePaths } from "@/lib/library";
 import type { DownloadStrategy, ReadinessSignal, ThirdPartyAppDescriptor } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** `null`이면 신규 등록. */
@@ -48,6 +49,7 @@ function isValidId(id: string): boolean {
 
 export function ThirdPartyAppEditDialog({ descriptor, existingIds, onSave, onCancel }: Props) {
   const isNew = descriptor === null;
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(true);
   const [draft, setDraft] = useState<ThirdPartyAppDescriptor>(descriptor ?? defaultNewDescriptor());
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,13 +112,17 @@ export function ThirdPartyAppEditDialog({ descriptor, existingIds, onSave, onCan
         role="dialog"
         aria-modal="true"
         aria-labelledby="third-party-app-edit-title"
-        onClick={() => !saving && onCancel()}
       >
         <div
           className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-lg border border-neutral-800 bg-neutral-900 shadow-2xl"
+          style={dragStyle}
           onClick={(e) => e.stopPropagation()}
         >
-          <h3 id="third-party-app-edit-title" className="px-6 py-3 text-base font-semibold text-neutral-50">
+          <h3
+            id="third-party-app-edit-title"
+            className="px-6 py-3 text-base font-semibold text-neutral-50"
+            onMouseDown={onHeaderMouseDown}
+          >
             {isNew ? "새 서드파티 앱 등록" : "서드파티 앱 편집"}
           </h3>
 

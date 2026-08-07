@@ -13,11 +13,12 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
 import { libraryGetSelectedOptionalGroups } from "@/lib/library";
-import type { Recipe } from "@/lib/library";
+import type { RecipeSummary } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** null 이면 닫힘. */
-  recipe: Recipe | null;
+  recipe: RecipeSummary | null;
   onConfirm: (groups: string[]) => void;
   onCancel: () => void;
 }
@@ -28,6 +29,7 @@ export function OptionalGroupsDialog({ recipe, onConfirm, onCancel }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(recipe !== null);
 
   useEffect(() => {
     if (!recipe) return;
@@ -79,7 +81,6 @@ export function OptionalGroupsDialog({ recipe, onConfirm, onCancel }: Props) {
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onCancel}
       role="dialog"
       aria-modal="true"
       aria-labelledby="optional-groups-title"
@@ -87,9 +88,14 @@ export function OptionalGroupsDialog({ recipe, onConfirm, onCancel }: Props) {
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="optional-groups-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="optional-groups-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {recipe.name} — 설치할 구성 요소 선택
         </h3>
         <p className="mt-1 text-xs text-neutral-500">

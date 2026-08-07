@@ -15,8 +15,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOutletContext } from "react-router";
 import { AppCard } from "@/components/AppCard";
+import { ArchiveConflictDialog, type ArchiveConflictResolved } from "@/components/ArchiveConflictDialog";
 import { DeleteInstalledDataDialog } from "@/components/DeleteInstalledDataDialog";
 import { OptionalGroupsDialog } from "@/components/OptionalGroupsDialog";
+import { OverrideConflictDialog } from "@/components/OverrideConflictDialog";
 import { LocalRootOverrideDialog } from "@/components/LocalRootOverrideDialog";
 import { RecipeEditDialog } from "@/components/RecipeEditDialog";
 import { ThirdPartyInstallDialog } from "@/components/ThirdPartyInstallDialog";
@@ -27,16 +29,27 @@ import {
   libraryCancelInstall,
   libraryDeleteInstalledData,
   libraryExportFile,
+  libraryGet,
   libraryInstall,
   libraryLaunch,
   libraryList,
   libraryOpenFolder,
   libraryRemove,
   libraryReorder,
+  libraryResolveArchiveConflicts,
+  libraryResolveOverrideConflicts,
   librarySetSelectedOptionalGroups,
   libraryUpsert,
 } from "@/lib/library";
-import type { InstallOutcome, LaunchOutcome, Recipe } from "@/lib/library";
+import type {
+  ArchiveConflictGroup,
+  InstallOutcome,
+  LaunchOutcome,
+  OverrideConflict,
+  OverrideConflictResolution,
+  Recipe,
+  RecipeSummary,
+} from "@/lib/library";
 
 interface ToastState {
   kind: "info" | "error";
@@ -46,7 +59,7 @@ interface ToastState {
 /** third-party app(예: Prism)이 없어서 멈춘 동작 — 설치받은 뒤 원래 동작을 재시도해야
  * 해서 "무엇을 하려던 참이었는지" 같이 기억해둔다. */
 interface PendingThirdPartyInstall {
-  recipe: Recipe;
+  recipe: RecipeSummary;
   retry: "install" | "launch";
 }
 
@@ -54,7 +67,7 @@ export default function Library() {
   // App.tsx 가 <Outlet context={reloadKey} /> 로 넘김 — 임포트 성공 시 bump.
   const reloadKey = useOutletContext<number>();
   const { confirmAsync, dialog: confirmDialog } = useConfirmDialog();
-  const [recipes, setRecipes] = useState<Recipe[] | null>(null);
+  const [recipes, setRecipes] = useState<RecipeSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // 카드 드래그 재정렬 — 끄는 중인 카드 id. 놓는 순간 실제 배열 순서를 바꾼다.
   const [draggedId, setDraggedId] = useState<string | null>(null);
@@ -88,12 +101,27 @@ export default function Library() {
   const [pendingInstall, setPendingInstall] = useState<PendingThirdPartyInstall | null>(null);
   // 선택적 그룹(부분 설치) 확인 다이얼로그 — `handleInstall`이 그룹 있는 레시피면
   // "설치" 버튼을 누를 때마다 매번 연다.
-  const [pendingOptionalGroups, setPendingOptionalGroups] = useState<Recipe | null>(null);
+  const [pendingOptionalGroups, setPendingOptionalGroups] = useState<RecipeSummary | null>(null);
+  // override 파일 드리프트 충돌 다이얼로그 — `libraryInstall`이
+  // `has_override_conflicts`를 반환하면 열림(`handleInstallOutcome` 참고).
+  const [pendingOverrideConflicts, setPendingOverrideConflicts] = useState<{
+    recipe: RecipeSummary;
+    conflicts: OverrideConflict[];
+  } | null>(null);
+  // 압축 해제 파일명 충돌 다이얼로그 — `libraryInstall`이 `has_archive_conflicts`를
+  // 반환하면 열림(`handleInstallOutcome` 참고).
+  const [pendingArchiveConflicts, setPendingArchiveConflicts] = useState<{
+    recipe: RecipeSummary;
+    archives: ArchiveConflictGroup[];
+  } | null>(null);
   // "로컬 폴더 연결" 다이얼로그 — 카드 메뉴에서 열림.
-  const [pendingLocalRootOverride, setPendingLocalRootOverride] = useState<Recipe | null>(null);
+  const [pendingLocalRootOverride, setPendingLocalRootOverride] = useState<RecipeSummary | null>(null);
   // 설치된 데이터 삭제 확인 — 선택적 그룹이 있는 레시피만 이 다이얼로그를 거친다
   // (전체/부분 삭제 선택). 그룹이 없으면 `handleDelete`가 바로 native confirm 처리.
-  const [pendingDelete, setPendingDelete] = useState<Recipe | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<RecipeSummary | null>(null);
+  // 편집 다이얼로그에 넘길 전체 `Recipe`(콘텐츠 포함) — 그리드가 들고 있는
+  // `RecipeSummary`엔 콘텐츠가 없어서, 편집을 열 때만 `libraryGet`으로 따로 받는다
+  // (`handleEditRequest` 참고).
   const [editingRecipe, setEditingRecipe] = useState<Recipe | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -140,7 +168,7 @@ export default function Library() {
     void refresh();
   }, [refresh, reloadKey]);
 
-  const handleInstallOutcome = useCallback((recipe: Recipe, outcome: InstallOutcome) => {
+  const handleInstallOutcome = useCallback((recipe: RecipeSummary, outcome: InstallOutcome) => {
     switch (outcome.kind) {
       case "completed":
         setToast({
@@ -168,18 +196,24 @@ export default function Library() {
         // 토스트 대신 조용한 안내만.
         setToast({ kind: "info", message: `${recipe.name}: 설치를 취소했습니다` });
         return;
+      case "has_override_conflicts":
+        setPendingOverrideConflicts({ recipe, conflicts: outcome.conflicts });
+        return;
+      case "has_archive_conflicts":
+        setPendingArchiveConflicts({ recipe, archives: outcome.archives });
+        return;
     }
   }, []);
 
-  const handleCancelInstall = useCallback((recipe: Recipe) => {
+  const handleCancelInstall = useCallback((recipe: RecipeSummary) => {
     void libraryCancelInstall(recipe.id);
   }, []);
 
   const doInstall = useCallback(
-    async (recipe: Recipe) => {
+    async (recipe: RecipeSummary) => {
       setInstallingId(recipe.id);
       try {
-        const outcome = await libraryInstall(recipe);
+        const outcome = await libraryInstall(recipe.id);
         handleInstallOutcome(recipe, outcome);
       } catch (e) {
         setToast({ kind: "error", message: String(e) });
@@ -197,7 +231,7 @@ export default function Library() {
    * 바로 설치 — "선택 필요" 뱃지로 첫 설치 때만 알려주던 옛 방식 대신, 설치할 때마다
    * 지금 선택을 확인/조정할 기회를 준다. */
   const handleInstall = useCallback(
-    async (recipe: Recipe) => {
+    async (recipe: RecipeSummary) => {
       if (recipe.optional_groups.length > 0) {
         setPendingOptionalGroups(recipe);
         return;
@@ -207,7 +241,7 @@ export default function Library() {
     [doInstall],
   );
 
-  const handleLaunchOutcome = useCallback((recipe: Recipe, outcome: LaunchOutcome) => {
+  const handleLaunchOutcome = useCallback((recipe: RecipeSummary, outcome: LaunchOutcome) => {
     switch (outcome.kind) {
       case "launched":
         setToast({ kind: "info", message: `${recipe.name} 실행 시작` });
@@ -219,10 +253,10 @@ export default function Library() {
   }, []);
 
   const handleLaunch = useCallback(
-    async (recipe: Recipe) => {
+    async (recipe: RecipeSummary) => {
       setLaunchingId(recipe.id);
       try {
-        const outcome = await libraryLaunch(recipe);
+        const outcome = await libraryLaunch(recipe.id);
         handleLaunchOutcome(recipe, outcome);
       } catch (e) {
         setToast({ kind: "error", message: String(e) });
@@ -267,14 +301,53 @@ export default function Library() {
     [pendingOptionalGroups, doInstall],
   );
 
+  /** override 충돌 확정 — 파일별 선택을 반영한 뒤 바로 재설치를 재시도한다(선택적
+   * 그룹 확정과 같은 "해결 후 재시도" 패턴). */
+  const handleOverrideConflictsResolved = useCallback(
+    async (resolutions: OverrideConflictResolution[]) => {
+      const pending = pendingOverrideConflicts;
+      setPendingOverrideConflicts(null);
+      if (!pending) return;
+      try {
+        await libraryResolveOverrideConflicts(pending.recipe.id, resolutions);
+      } catch (e) {
+        setToast({ kind: "error", message: String(e) });
+        return;
+      }
+      await doInstall(pending.recipe);
+    },
+    [pendingOverrideConflicts, doInstall],
+  );
+
+  /** 압축 충돌 확정 — 그룹(압축)마다 해결 커맨드를 따로 호출한 뒤(해결 커맨드가
+   * 압축 하나씩만 받음) 바로 재설치를 재시도한다. 보존해둔 다운로드를 재사용하므로
+   * 재다운로드 없이 이어진다. */
+  const handleArchiveConflictsResolved = useCallback(
+    async (resolved: ArchiveConflictResolved[]) => {
+      const pending = pendingArchiveConflicts;
+      setPendingArchiveConflicts(null);
+      if (!pending) return;
+      try {
+        for (const group of resolved) {
+          await libraryResolveArchiveConflicts(pending.recipe.id, group.archiveHash, group.resolutions);
+        }
+      } catch (e) {
+        setToast({ kind: "error", message: String(e) });
+        return;
+      }
+      await doInstall(pending.recipe);
+    },
+    [pendingArchiveConflicts, doInstall],
+  );
+
   /** 설치된 데이터를 지우되, "로컬 경로 오버라이드라 자동 삭제 안 함"(백엔드가
    * 사용자 지정 폴더를 보호하려고 던지는 에러)은 실패로 치지 않고 계속 진행한다 —
    * 그 폴더는 원래도 PengPort가 안 건드리는 게 맞아서 라이브러리 제거 자체를 막을
    * 이유가 없다. 그 외 에러(권한 등 실제 실패)만 진짜 실패로 보고 토스트 후 false —
    * 호출자는 그 항목의 라이브러리 제거를 진행하지 않는다(재시도 가능하게 남겨둠). */
-  const deleteInstalledDataTolerant = useCallback(async (recipe: Recipe): Promise<boolean> => {
+  const deleteInstalledDataTolerant = useCallback(async (recipe: RecipeSummary): Promise<boolean> => {
     try {
-      await libraryDeleteInstalledData(recipe);
+      await libraryDeleteInstalledData(recipe.id);
       return true;
     } catch (e) {
       const message = String(e);
@@ -289,7 +362,7 @@ export default function Library() {
    * 폐기(고아 데이터가 남아 정리할 방법이 사라지는 문제가 있었음) — 그 대신 확인
    * 창(`AppCard.tsx`의 `CardMenu.handleRemove`)에서 되돌릴 수 없음을 명시. */
   const handleRemove = useCallback(
-    async (recipe: Recipe) => {
+    async (recipe: RecipeSummary) => {
       const ok = await deleteInstalledDataTolerant(recipe);
       if (!ok) return;
       await libraryRemove(recipe.id);
@@ -299,9 +372,9 @@ export default function Library() {
     [refresh, deleteInstalledDataTolerant],
   );
 
-  const runDelete = useCallback(async (recipe: Recipe, groups?: string[]) => {
+  const runDelete = useCallback(async (recipe: RecipeSummary, groups?: string[]) => {
     try {
-      await libraryDeleteInstalledData(recipe, groups);
+      await libraryDeleteInstalledData(recipe.id, groups);
       const groupLabels = groups
         ?.map((id) => recipe.optional_groups.find((g) => g.id === id)?.label ?? id)
         .join(", ");
@@ -321,7 +394,7 @@ export default function Library() {
   /** "삭제" 메뉴 클릭 — 선택적 그룹이 있으면 전용 다이얼로그(전체/부분 삭제 선택),
    * 없으면 간단한 confirm 하나로 바로 전체 삭제. */
   const handleDelete = useCallback(
-    async (recipe: Recipe) => {
+    async (recipe: RecipeSummary) => {
       if (recipe.optional_groups.length > 0) {
         setPendingDelete(recipe);
         return;
@@ -348,7 +421,7 @@ export default function Library() {
    * (`librarySetSelectedOptionalGroups`와 별개 저장소), 재설치는 기존 선택 그대로
    * 복원된다 — 다이얼로그 다시 안 띄움. */
   const handleReinstall = useCallback(
-    (recipe: Recipe) => {
+    (recipe: RecipeSummary) => {
       void (async () => {
         const ok = await confirmAsync(
           `${recipe.name} 을(를) 재설치할까요?\n\n` +
@@ -373,9 +446,9 @@ export default function Library() {
     [pendingDelete, runDelete],
   );
 
-  const handleOpenFolder = useCallback(async (recipe: Recipe) => {
+  const handleOpenFolder = useCallback(async (recipe: RecipeSummary) => {
     try {
-      await libraryOpenFolder(recipe);
+      await libraryOpenFolder(recipe.id);
     } catch (e) {
       setToast({ kind: "error", message: String(e) });
     }
@@ -384,7 +457,7 @@ export default function Library() {
   /** 딥링크(`.pengz` 파일)로 내보내기 — OS 커맨드라인 길이 한도를 피하는 링크의
    * 파일 버전(자세한 배경은 `commands/file_import.rs` 모듈 설명). 저장 위치는 OS
    * 저장 다이얼로그로 받는다. */
-  const handleExport = useCallback(async (recipe: Recipe) => {
+  const handleExport = useCallback(async (recipe: RecipeSummary) => {
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
@@ -482,6 +555,22 @@ export default function Library() {
     toggleSelectionMode();
     await refresh();
   }, [recipes, selectedIds, deleteInstalledDataTolerant, toggleSelectionMode, refresh, confirmAsync]);
+
+  /** "앱 편집" 메뉴 클릭 — 그리드가 들고 있는 `RecipeSummary`엔 콘텐츠(archives/files의
+   * override_content)가 없으므로, 편집 다이얼로그를 열 때만 `libraryGet`으로 그
+   * 레시피 하나의 전체 `Recipe`를 따로 받는다. */
+  const handleEditRequest = useCallback(async (id: string) => {
+    try {
+      const full = await libraryGet(id);
+      if (!full) {
+        setToast({ kind: "error", message: "레시피를 찾을 수 없습니다 — 목록을 새로고침해주세요" });
+        return;
+      }
+      setEditingRecipe(full);
+    } catch (e) {
+      setToast({ kind: "error", message: String(e) });
+    }
+  }, []);
 
   const handleSaveEdit = useCallback(
     async (recipe: Recipe) => {
@@ -651,7 +740,7 @@ export default function Library() {
                 onReinstall={() => handleReinstall(recipe)}
                 onOpenFolder={() => handleOpenFolder(recipe)}
                 onLinkFolder={() => setPendingLocalRootOverride(recipe)}
-                onEdit={() => setEditingRecipe(recipe)}
+                onEdit={() => void handleEditRequest(recipe.id)}
                 onExport={() => void handleExport(recipe)}
                 statusRefreshKey={statusVersion}
                 selectionMode={selectionMode}
@@ -677,6 +766,20 @@ export default function Library() {
         recipe={pendingOptionalGroups}
         onConfirm={(groups) => void handleOptionalGroupsConfirmed(groups)}
         onCancel={() => setPendingOptionalGroups(null)}
+      />
+
+      <OverrideConflictDialog
+        recipe={pendingOverrideConflicts?.recipe ?? null}
+        conflicts={pendingOverrideConflicts?.conflicts ?? []}
+        onConfirm={(resolutions) => void handleOverrideConflictsResolved(resolutions)}
+        onCancel={() => setPendingOverrideConflicts(null)}
+      />
+
+      <ArchiveConflictDialog
+        recipe={pendingArchiveConflicts?.recipe ?? null}
+        archives={pendingArchiveConflicts?.archives ?? []}
+        onConfirm={(resolved) => void handleArchiveConflictsResolved(resolved)}
+        onCancel={() => setPendingArchiveConflicts(null)}
       />
 
       <LocalRootOverrideDialog

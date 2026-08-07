@@ -9,11 +9,12 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
 import { libraryGetLocalRootOverride, librarySetLocalRootOverride } from "@/lib/library";
-import type { Recipe } from "@/lib/library";
+import type { RecipeSummary } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** null 이면 닫힘. */
-  recipe: Recipe | null;
+  recipe: RecipeSummary | null;
   onClose: () => void;
 }
 
@@ -26,6 +27,7 @@ type Phase =
 export function LocalRootOverrideDialog({ recipe, onClose }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(recipe !== null);
 
   useEffect(() => {
     if (!recipe) return;
@@ -88,7 +90,6 @@ export function LocalRootOverrideDialog({ recipe, onClose }: Props) {
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="local-root-override-title"
@@ -96,9 +97,14 @@ export function LocalRootOverrideDialog({ recipe, onClose }: Props) {
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="local-root-override-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="local-root-override-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {recipe.name} — 로컬 폴더 연결
         </h3>
         <p className="mt-1 text-xs text-neutral-500">

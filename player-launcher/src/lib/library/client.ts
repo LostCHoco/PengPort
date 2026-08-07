@@ -1,23 +1,35 @@
 // `commands/library.rs` 의 Tauri 커맨드 typed wrapper. 옛 `lib/psp/client.ts` 대체.
 //
 // 카탈로그/인스턴스 fetch 가 없어져 TTL 캐시(`lib/psp/cache.ts`)도 함께 사라짐 —
-// `library_list` 는 로컬 파일 읽기라 매번 다시 불러도 비용이 낮음.
+// `library_list`는 로컬 파일 읽기라 매번 다시 불러도 비용이 낮다(단, `RecipeSummary`
+// 처럼 콘텐츠를 뺀 가벼운 응답에 한해서다 — 전체 `Recipe`를 반복 왕복시키면 큰 파일
+// 오버라이드가 있는 레시피에서 눈에 띄게 느려진다는 게 2026-08 실사용 리포트로
+// 확인됨. 그래서 설치/실행/상태조회/폴더열기는 전부 id만 넘기고 백엔드가 필요할 때
+// 디스크에서 직접 읽는다 — `RecipeSummary` 문서 참고).
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ArchiveEntryResolution,
   ArtifactVerification,
-  ConfigFileFormat,
-  ConfigPatch,
   ImportPreview,
   InstallDiagnostic,
   InstallOutcome,
   InstallStatus,
   LaunchOutcome,
+  OverrideConflictResolution,
   Recipe,
+  RecipeSummary,
 } from "./types";
 
-export function libraryList(): Promise<Recipe[]> {
-  return invoke<Recipe[]>("library_list");
+/** 라이브러리 그리드용 가벼운 목록 — 실제 콘텐츠가 필요하면 [`libraryGet`]. */
+export function libraryList(): Promise<RecipeSummary[]> {
+  return invoke<RecipeSummary[]>("library_list");
+}
+
+/** [`libraryList`]가 뺀 실제 콘텐츠(archives/files의 override_content 등)까지 포함한
+ * 전체 레시피 하나 — 레시피 편집 다이얼로그를 열 때만 호출. 없는 id면 `null`. */
+export function libraryGet(id: string): Promise<Recipe | null> {
+  return invoke<Recipe | null>("library_get", { id });
 }
 
 export function libraryUpsert(recipe: Recipe): Promise<void> {
@@ -84,8 +96,28 @@ export function takePendingPengzFile(): Promise<string | null> {
 
 /** 처음 설치든, 이미 설치된 레시피의 변경분 반영("업데이트")이든 지금 레시피와 실제
  * 설치 상태가 다른 스텝만 적용하는 같은 커맨드 — "설치" 버튼은 항상 이것만 호출한다. */
-export function libraryInstall(recipe: Recipe): Promise<InstallOutcome> {
-  return invoke<InstallOutcome>("library_install", { recipe });
+export function libraryInstall(id: string): Promise<InstallOutcome> {
+  return invoke<InstallOutcome>("library_install", { id });
+}
+
+/** `InstallOutcome.has_override_conflicts`로 받은 파일들을 사용자가 고른 방식대로
+ * 처리 — 끝나면 [`libraryInstall`]을 다시 호출해서 이어가야 한다. */
+export function libraryResolveOverrideConflicts(
+  id: string,
+  resolutions: OverrideConflictResolution[],
+): Promise<void> {
+  return invoke<void>("library_resolve_override_conflicts", { id, resolutions });
+}
+
+/** `InstallOutcome.has_archive_conflicts`로 받은 압축 하나의 충돌 파일들을 사용자가
+ * 고른 방식대로 저장 — 끝나면 [`libraryInstall`]을 다시 호출해서 이어가야 한다(보존해둔
+ * 다운로드를 재사용하므로 재다운로드 없음). */
+export function libraryResolveArchiveConflicts(
+  id: string,
+  archiveHash: string,
+  resolutions: ArchiveEntryResolution[],
+): Promise<void> {
+  return invoke<void>("library_resolve_archive_conflicts", { id, archiveHash, resolutions });
 }
 
 /** 진행 중인 설치/업데이트를 취소 — 협조적 취소라 즉시 멈추진 않고, 실행 중인 다운로드/
@@ -110,25 +142,25 @@ export function libraryStageManualArchiveFile(
 
 /** 레시피 실행 — 설치는 안 함(설치 안 돼 있으면 에러). per-launch confirm 없음 —
  * 라이브러리에 있다는 것 자체가 신뢰 표시. */
-export function libraryLaunch(recipe: Recipe): Promise<LaunchOutcome> {
-  return invoke<LaunchOutcome>("library_launch", { recipe });
+export function libraryLaunch(id: string): Promise<LaunchOutcome> {
+  return invoke<LaunchOutcome>("library_launch", { id });
 }
 
 /** 설치/업데이트가 필요한지 조회만(부작용 없음) — 카드에 "미설치"/"업데이트 필요"
  * 뱃지를 보여주기 위함. */
-export function libraryInstallStatus(recipe: Recipe): Promise<InstallStatus> {
-  return invoke<InstallStatus>("library_install_status", { recipe });
+export function libraryInstallStatus(id: string): Promise<InstallStatus> {
+  return invoke<InstallStatus>("library_install_status", { id });
 }
 
 /** "업데이트 필요"가 왜 뜨는지 — 어느 항목(압축/오버라이드)이 아직 반영된 적 없는지의
  * 목록. 카드 렌더링마다 부르지 말고 사용자가 뱃지를 눌렀을 때만. */
-export function libraryInstallDiagnostics(recipe: Recipe): Promise<InstallDiagnostic[]> {
-  return invoke<InstallDiagnostic[]>("library_install_diagnostics", { recipe });
+export function libraryInstallDiagnostics(id: string): Promise<InstallDiagnostic[]> {
+  return invoke<InstallDiagnostic[]>("library_install_diagnostics", { id });
 }
 
 /** 레시피가 로컬에 설치한 폴더를 OS 파일 탐색기로 연다. */
-export function libraryOpenFolder(recipe: Recipe): Promise<void> {
-  return invoke<void>("library_open_folder", { recipe });
+export function libraryOpenFolder(id: string): Promise<void> {
+  return invoke<void>("library_open_folder", { id });
 }
 
 /** 설치된 데이터를 삭제 — **라이브러리 항목은 남긴다**("라이브러리에서 제거"는
@@ -136,14 +168,8 @@ export function libraryOpenFolder(recipe: Recipe): Promise<void> {
  * 설치할 수 있게 함). `groups`를 생략하면 전체 삭제, id 목록을 주면 그 선택적
  * 그룹들만 부분 삭제(베이스 + 다른 그룹은 유지). 로컬 루트 오버라이드가 설정된
  * 항목은 백엔드가 거부한다. */
-export function libraryDeleteInstalledData(recipe: Recipe, groups?: string[]): Promise<void> {
-  return invoke<void>("library_delete_installed_data", { recipe, groups: groups ?? null });
-}
-
-/** 레시피 편집 화면의 "파일에서 불러오기" — 로컬 설정 파일을 통째로 읽어
- * `OverrideContent::ConfigPatch.patch`에 채울 JSON 값으로 파싱. */
-export function readConfigFileAsPatch(path: string, format: ConfigFileFormat): Promise<ConfigPatch> {
-  return invoke<ConfigPatch>("read_config_file_as_patch", { path, format });
+export function libraryDeleteInstalledData(id: string, groups?: string[]): Promise<void> {
+  return invoke<void>("library_delete_installed_data", { id, groups: groups ?? null });
 }
 
 /** 레시피 편집 화면의 "폴더 불러오기" — 로컬 폴더를 재귀적으로 훑어서 상대경로
@@ -158,6 +184,13 @@ export function scanFolderRelativePaths(root: string): Promise<string[]> {
  * 도구를 따로 안 써도 되게 하기 위함. */
 export function computeFileSha256(path: string): Promise<string> {
   return invoke<string>("compute_file_sha256", { path });
+}
+
+/** base64 override "파일에서 불러오기" — 로컬 파일을 통째로 base64 인코딩해
+ * 받는다. 프론트에서 직접 인코딩하면 큰 파일일수록 거대 문자열 처리 자체가
+ * 무거워지므로(편집 다이얼로그 렌더링 지연의 원인이었음) Rust 쪽에서 처리. */
+export function readFileBase64(path: string): Promise<string> {
+  return invoke<string>("read_file_base64", { path });
 }
 
 /** 등록된 third-party app descriptor id 목록(로컬 파일, 링크 임포트로 채워짐) —

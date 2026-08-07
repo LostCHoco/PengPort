@@ -11,11 +11,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
-import type { Recipe } from "@/lib/library";
+import type { RecipeSummary } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** null 이면 닫힘. */
-  recipe: Recipe | null;
+  recipe: RecipeSummary | null;
   onConfirmAll: () => void;
   onConfirmGroups: (groups: string[]) => void;
   onCancel: () => void;
@@ -24,6 +25,7 @@ interface Props {
 export function DeleteInstalledDataDialog({ recipe, onConfirmAll, onConfirmGroups, onCancel }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(recipe !== null);
 
   useEffect(() => {
     if (recipe) setChecked(new Set());
@@ -57,7 +59,6 @@ export function DeleteInstalledDataDialog({ recipe, onConfirmAll, onConfirmGroup
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onCancel}
       role="dialog"
       aria-modal="true"
       aria-labelledby="delete-installed-title"
@@ -65,9 +66,14 @@ export function DeleteInstalledDataDialog({ recipe, onConfirmAll, onConfirmGroup
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="delete-installed-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="delete-installed-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {recipe.name} — 설치된 데이터 삭제
         </h3>
         <p className="mt-1 text-xs text-neutral-500">

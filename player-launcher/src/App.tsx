@@ -241,7 +241,7 @@ function EphemeralExitDialog({
             size="sm"
             onClick={onConfirm}
             disabled={state.kind === "wiping"}
-            className="cursor-pointer bg-red-700 hover:bg-red-600 disabled:cursor-not-allowed"
+            className="cursor-pointer bg-red-700 hover:bg-red-600"
           >
             종료 + 정리
           </Button>

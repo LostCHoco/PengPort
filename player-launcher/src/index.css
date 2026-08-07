@@ -26,6 +26,15 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* 텍스트 라벨 드래그-선택 비활성화 — 입력 필드는 예외. 목적지 트리의 마퀴
+     선택/드래그 이동 같은 클릭-드래그 상호작용이 늘면서, 라벨 위를 끌 때 브라우저
+     기본 텍스트 하이라이트가 같이 발생해 지저분해 보이는 걸 막는다(2026-08). */
+  user-select: none;
+}
+
+input,
+textarea {
+  user-select: text;
 }
 
 @theme inline {
@@ -150,4 +159,33 @@ body {
   html {
     @apply font-sans;
   }
+}
+
+/* 커스텀 스크롤바 — 앱 전역에서 이미 쓰는 dark neutral 팔레트에 맞춤. Tauri
+   Windows 배포판은 WebView2(Chromium 계열)로 고정이라 ::-webkit-scrollbar만으로
+   충분 — 다른 렌더링 엔진 폴백은 불필요. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  /* textarea 등 조상 요소의 cursor(예: text)가 스크롤바 위에서도 그대로 새어나오는
+     걸 막음 — 스크롤바는 별도 pseudo-element라 여기서 직접 끊어줘야 한다. */
+  cursor: default;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #404040; /* neutral-700 */
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #525252; /* neutral-600 */
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: #737373; /* neutral-500 */
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

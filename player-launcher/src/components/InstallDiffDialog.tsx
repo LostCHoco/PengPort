@@ -13,11 +13,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Portal } from "@/components/ui/portal";
 import { libraryInstallDiagnostics } from "@/lib/library";
-import type { InstallDiagnostic, Recipe } from "@/lib/library";
+import type { InstallDiagnostic, RecipeSummary } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 interface Props {
   /** null 이면 닫힘. 값이 있으면 그 레시피의 진단을 조회해서 연다. */
-  recipe: Recipe | null;
+  recipe: RecipeSummary | null;
   onClose: () => void;
 }
 
@@ -29,6 +30,7 @@ type Phase =
 export function InstallDiffDialog({ recipe, onClose }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(recipe !== null);
 
   useEffect(() => {
     if (!recipe) return;
@@ -36,7 +38,7 @@ export function InstallDiffDialog({ recipe, onClose }: Props) {
     setPhase({ kind: "loading" });
     (async () => {
       try {
-        const diagnostics = await libraryInstallDiagnostics(recipe);
+        const diagnostics = await libraryInstallDiagnostics(recipe.id);
         if (!cancelled) setPhase({ kind: "loaded", diagnostics });
       } catch (e) {
         if (!cancelled) setPhase({ kind: "error", message: String(e) });
@@ -66,7 +68,6 @@ export function InstallDiffDialog({ recipe, onClose }: Props) {
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="install-diff-title"
@@ -74,9 +75,14 @@ export function InstallDiffDialog({ recipe, onClose }: Props) {
       <div
         ref={cardRef}
         className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="install-diff-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="install-diff-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           {recipe.name} — 왜 업데이트가 필요한가요?
         </h3>
         <p className="mt-1 text-xs text-neutral-500">

@@ -52,7 +52,7 @@ pub struct Recipe {
     #[serde(default)]
     pub files: Vec<RecipeFile>,
 
-    /// 선택적으로 설치할 수 있는 그룹 선언(예: 리듬게임의 난이도별 채보 팩) — 부분
+    /// 선택적으로 설치할 수 있는 그룹 선언(예: 게임의 난이도별 콘텐츠 팩) — 부분
     /// 설치를 지원한다. `files` 중 [`RecipeFile::optional_group`]이 여기 선언된 id를
     /// 참조하는 항목만 "선택 안 하면 없어도 되는" 파일이 된다. 선택 상태 자체는
     /// 레시피(공유 데이터)가 아니라 로컬 전용(`LibraryEntry::selected_optional_groups`)
@@ -89,7 +89,15 @@ pub struct FolderRule {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FolderRuleMode {
     /// 이 폴더 밑은 pruning 대상에서 완전히 제외 — 뭐가 있든 손대지 않는다.
-    Passthrough,
+    Passthrough {
+        /// 압축 해제 중 이 폴더 밑에서 이름은 같고 내용은 다른 기존 파일과 부딪히면
+        /// 설치를 멈추고 확인(덮어쓰기/건너뛰기/이름 바꿔 복사)받을지. 기본 `false`
+        /// (지금까지처럼 조용히 덮어씀) — 사용자 파일이 섞일 만한 폴더에서만 레시피
+        /// 작성자가 켠다. 내용이 완전히 같은 파일은 이 설정과 무관하게 항상 그냥
+        /// 덮어씀(잃을 게 없으므로).
+        #[serde(default)]
+        ask_on_conflict: bool,
+    },
     /// 선언된 `RecipeFile` 경로 ∪ `patterns`(이 폴더 기준 상대 글롭)에 매치되는 파일만
     /// 허용 집합에 포함, 나머지는 삭제. `patterns`가 비어있으면 순수 화이트리스트와
     /// 동일 동작. 이 규칙(경로+패턴)이 바뀌지 않는 한 다시 적용되지 않는다.
@@ -174,7 +182,7 @@ pub struct ArchiveExtraction {
     pub extract_to: String,
     /// [`RecipeFile::optional_group`]과 같은 개념 — 없으면 항상 다운로드, 있으면 그
     /// 그룹이 선택됐을 때만 다운로드한다. 압축 자체가 특정 선택 그룹 전용인 경우
-    /// (예: 채보 팩 하나가 통째로 별도 압축)에 쓴다 — 화이트리스트로 사후에 걸러내는
+    /// (예: 콘텐츠 팩 하나가 통째로 별도 압축)에 쓴다 — 화이트리스트로 사후에 걸러내는
     /// 것과 달리, 애초에 안 받아도 되는 걸 안 받는다(불필요한 다운로드 방지).
     #[serde(default)]
     pub optional_group: Option<String>,
@@ -198,6 +206,13 @@ pub struct ArchiveExtraction {
 /// 열었을 때 보이는 경로 — `strip_root`가 적용되는 경우 그것까지 벗겨낸 뒤의 경로,
 /// `extract_to` 적용 전). `to`는 [`Recipe::launch`]가 정한 루트 기준 최종 경로
 /// ([`RecipeFile::path`]와 같은 표현 — 슬래시 구분, 대상 루트가 유일한 기준).
+///
+/// `from`이 파일 하나와 정확히 안 겹치고 폴더 단위로 매칭될 때는 rsync/cp의 트레일링
+/// 슬래시 관례를 따른다: `"GroupA/"`(슬래시 있음)는 내용만 `to` 밑으로 옮기고 `GroupA`
+/// 폴더 이름 자체는 사라짐(strip). `"GroupA"`(슬래시 없음)는 폴더 이름을 유지한 채
+/// `to` 밑에 통째로 얹는다(`to/GroupA/...`). 실제 매칭/치환 로직은
+/// `commands::library::resolve_path_override_target`(Tauri 전용이라 여기 shared
+/// 크레이트엔 없음).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathOverride {
     pub from: String,
@@ -213,7 +228,7 @@ pub struct RecipeFile {
     /// [`Recipe::launch`]가 정한 루트 기준 상대 경로.
     pub path: String,
     /// 없으면 압축 해제 결과 그대로(화이트리스트 멤버로만 존재). 있으면 그 내용으로
-    /// 덮어쓰거나(Literal) 특정 key만 patch(ConfigPatch).
+    /// 덮어씀.
     #[serde(default)]
     pub override_content: Option<OverrideContent>,
     /// 없으면 항상 필수. 있으면 [`Recipe::optional_groups`]의 그 id 그룹에 속함 —
@@ -223,20 +238,17 @@ pub struct RecipeFile {
     pub optional_group: Option<String>,
 }
 
-/// [`RecipeFile::override_content`] — 파일에 실제로 어떤 내용을 반영할지.
+/// [`RecipeFile::override_content`] — 파일에 실제로 어떤 내용을 반영할지. 부분 patch
+/// 없이 전체 덮어쓰기 하나뿐인 이유: 이 값이 적용되는 시점(설치/재조정, `execute_override`)
+/// 엔 대상 파일이 압축 해제로 막 생겨난 것뿐이라(앱이 실행되며 스스로 채운 값이 아님 —
+/// 설치는 항상 첫 실행보다 먼저 끝남) 레시피 작성자가 이미 그 파일의 전체 내용을 알고
+/// 있다. 설치 이후(실행 중 사용자가 직접 바꾼 값 등)는 PengPort가 애초에 관여하지
+/// 않는 영역이라 보존할 "알 수 없는 나머지"가 구조적으로 없다.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OverrideContent {
     /// 파일 전체를 이 내용으로 그대로 씀.
     Literal { content: FileContent },
-    /// 기존 파일(압축 해제 등으로 이미 존재해야 함)의 특정 key만 patch — 다른 내용
-    /// 보존. 예: option.ini 같은 설정 파일의 특정 key만 바꾸는 케이스. `patch`는 포맷 무관 공통 표현 — 중첩
-    /// 객체(예: ini/toml은 `{섹션: {키: 값}}`, json은 그 자체 구조)로 "이 값들을
-    /// 덮어써라"를 나타낸다.
-    ConfigPatch {
-        format: ConfigFileFormat,
-        patch: serde_json::Value,
-    },
 }
 
 /// 실행 방법 — 정확히 1개. `archives`/`files`의 대상 루트도 이게 결정한다(모듈 설명
@@ -259,28 +271,13 @@ pub enum LaunchAction {
 }
 
 /// [`OverrideContent::Literal`]이 쓰는 정적 콘텐츠. 텍스트(instance.cfg, mmc-pack.json
-/// 등)와 바이너리(servers.dat NBT 등) 둘 다 지원.
+/// 등) 전용 — 바이너리(base64)는 2026-08 보안 강화로 제거됨(`ArtifactVerification`
+/// 대상이 아닌 리터럴 콘텐츠로 임의 바이트를 심을 수 있는 통로였음). 바이너리 자산은
+/// `ArchiveExtraction`(해시 검증됨)으로만 반영한다.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "encoding", rename_all = "snake_case")]
 pub enum FileContent {
     Text { content: String },
-    /// base64 인코딩된 바이너리 콘텐츠.
-    Base64 { data: String },
-}
-
-/// [`OverrideContent::ConfigPatch`]의 대상 파일 포맷 — 순수 태그. 파싱/patch 적용 로직은
-/// `player-launcher/src-tauri/src/commands/config_patch.rs`가 이 태그로 분기해서 처리
-/// (레시피 데이터 쪽엔 포맷별 타입이 없음 — 새 포맷 추가는 그 분기 함수에 브랜치
-/// 하나 추가하는 것으로 끝, 이 enum에 variant 하나 느는 것 외엔 스키마 변화 없음).
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigFileFormat {
-    /// `[section]` + `key=value`. `patch`는 `{"섹션": {"키": 값}}`.
-    Ini,
-    /// `patch`를 그대로 파일의 최상위 구조에 재귀 병합.
-    Json,
-    /// TOML 테이블. `patch`는 ini와 동일하게 `{"테이블": {"키": 값}}`.
-    Toml,
 }
 
 #[cfg(test)]
@@ -299,8 +296,8 @@ mod tests {
               "override_content": { "kind": "literal", "content": { "encoding": "text", "content": "name=sample-service\n" } }
             },
             {
-              "path": ".gamedata/data.bin",
-              "override_content": { "kind": "literal", "content": { "encoding": "base64", "data": "AAAA" } }
+              "path": ".gamedata/data.cfg",
+              "override_content": { "kind": "literal", "content": { "encoding": "text", "content": "key=value\n" } }
             }
           ],
           "launch": {
@@ -327,7 +324,7 @@ mod tests {
         }
     }
 
-    /// 포터블 앱(직접 spawn) 사례 — 본체 압축 해제 + entry_point + 설정 파일 설치시 patch.
+    /// 포터블 앱(직접 spawn) 사례 — 본체 압축 해제 + entry_point + 설정 파일 설치시 전체 덮어쓰기.
     #[test]
     fn deserialize_portable_app_recipe() {
         let json = r#"
@@ -347,9 +344,8 @@ mod tests {
             {
               "path": "SampleApp/option.ini",
               "override_content": {
-                "kind": "config_patch",
-                "format": "ini",
-                "patch": { "GRAPHICS": { "3D_Mode": "0" } }
+                "kind": "literal",
+                "content": { "encoding": "text", "content": "[GRAPHICS]\n3D_Mode=0\n" }
               }
             }
           ],
@@ -366,11 +362,10 @@ mod tests {
         assert_eq!(r.files.len(), 2);
         assert!(r.files[0].override_content.is_none()); // 화이트리스트 멤버로만 존재
         match &r.files[1].override_content {
-            Some(OverrideContent::ConfigPatch { format, patch }) => {
-                assert_eq!(*format, ConfigFileFormat::Ini);
-                assert_eq!(patch["GRAPHICS"]["3D_Mode"], "0");
+            Some(OverrideContent::Literal { content: FileContent::Text { content } }) => {
+                assert_eq!(content, "[GRAPHICS]\n3D_Mode=0\n");
             }
-            other => panic!("expected ConfigPatch, got {other:?}"),
+            other => panic!("expected Literal, got {other:?}"),
         }
         match &r.launch {
             LaunchAction::SpawnProcess { entry_point, entry_args } => {

@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
 import { libraryPreviewImportFile } from "@/lib/library";
 import type { ImportPreview } from "@/lib/library";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 export interface ImportRequest {
   path: string;
@@ -31,6 +32,7 @@ type PreviewState =
 export function ImportDialog({ request, onAccept, onDecline, processing = false }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(request !== null);
 
   useEffect(() => {
     if (!request) return;
@@ -72,9 +74,6 @@ export function ImportDialog({ request, onAccept, onDecline, processing = false 
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={() => {
-        if (!processing) onDecline();
-      }}
       role="dialog"
       aria-modal="true"
       aria-labelledby="import-title"
@@ -82,9 +81,14 @@ export function ImportDialog({ request, onAccept, onDecline, processing = false 
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="import-title" className="text-lg font-semibold text-neutral-50">
+        <h3
+          id="import-title"
+          className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
+        >
           라이브러리에 추가
         </h3>
 

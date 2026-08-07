@@ -198,7 +198,7 @@ impl LibraryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::recipe::{ConfigFileFormat, LaunchAction, OverrideContent, RecipeFile};
+    use crate::library::recipe::{FileContent, LaunchAction, OverrideContent, RecipeFile};
 
     fn temp_path(name: &str) -> PathBuf {
         let p = std::env::temp_dir()
@@ -215,9 +215,8 @@ mod tests {
             archives: vec![],
             files: vec![RecipeFile {
                 path: "x.ini".to_string(),
-                override_content: Some(OverrideContent::ConfigPatch {
-                    format: ConfigFileFormat::Ini,
-                    patch: serde_json::json!({}),
+                override_content: Some(OverrideContent::Literal {
+                    content: FileContent::Text { content: "[GRAPHICS]\n3D_Mode=0\n".to_string() },
                 }),
                 optional_group: None,
             }],
@@ -344,7 +343,7 @@ mod tests {
         let mut store = LibraryStore::load(&path).unwrap();
         store.upsert(sample_recipe("sample-app"));
         let mut groups = std::collections::HashSet::new();
-        groups.insert("esong".to_string());
+        groups.insert("groupa".to_string());
         assert!(store.set_selected_optional_groups("sample-app", Some(groups.clone())));
         assert_eq!(store.get("sample-app").unwrap().selected_optional_groups, Some(groups.clone()));
 
@@ -361,7 +360,7 @@ mod tests {
         let mut store = LibraryStore::load(&path).unwrap();
         store.upsert(sample_recipe("sample-app"));
         let mut groups = std::collections::HashSet::new();
-        groups.insert("esong".to_string());
+        groups.insert("groupa".to_string());
         store.set_selected_optional_groups("sample-app", Some(groups));
         store.set_selected_optional_groups("sample-app", None);
         assert_eq!(store.get("sample-app").unwrap().selected_optional_groups, None);

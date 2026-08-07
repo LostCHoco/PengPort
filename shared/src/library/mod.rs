@@ -17,9 +17,8 @@ pub mod verify;
 pub use bundle::{decode_bundle_file, encode_bundle_file, BundleError, FILE_EXTENSION};
 pub use import::{ImportPreview, ImportPreviewItem};
 pub use recipe::{
-    ArchiveExtraction, ArtifactVerification, ConfigFileFormat, FileContent, FolderRule,
-    FolderRuleMode, LaunchAction, OptionalGroup, OverrideContent, PathOverride, Recipe,
-    RecipeFile, RecipeInfo,
+    ArchiveExtraction, ArtifactVerification, FileContent, FolderRule, FolderRuleMode,
+    LaunchAction, OptionalGroup, OverrideContent, PathOverride, Recipe, RecipeFile, RecipeInfo,
 };
 pub use store::{LibraryEntry, LibraryError, LibraryStore};
 pub use third_party_store::{ThirdPartyAppStore, ThirdPartyStoreError};

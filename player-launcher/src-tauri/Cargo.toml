@@ -32,10 +32,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 ureq = { workspace = true }
 zip = { workspace = true }
 sevenz-rust2 = { workspace = true }
+crc32fast = { workspace = true }
 # InstallStep::WriteFile/ThirdPartyAppSetup 의 FileContent::Base64 디코딩.
 base64 = { workspace = true }
 # 설치/업데이트 idempotent 마커 — 스텝 내용 해시로 "이 스텝이 이미(그리고 지금과

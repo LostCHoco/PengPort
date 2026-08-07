@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Portal } from "@/components/ui/portal";
+import { useDraggablePosition } from "@/lib/use-draggable-position";
 
 export interface UpdatePromptInfo {
   version: string;
@@ -32,6 +33,7 @@ type Phase =
 export function UpdatePromptDialog({ info, onDismiss }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const { style: dragStyle, onHeaderMouseDown } = useDraggablePosition(info !== null);
 
   // info 가 새로 들어올 때마다 phase reset.
   useEffect(() => {
@@ -68,15 +70,10 @@ export function UpdatePromptDialog({ info, onDismiss }: Props) {
     }
   };
 
-  const handleBackdrop = () => {
-    if (phase.kind !== "installing") onDismiss();
-  };
-
   return (
     <Portal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={handleBackdrop}
       role="dialog"
       aria-modal="true"
       aria-labelledby="update-prompt-title"
@@ -84,11 +81,13 @@ export function UpdatePromptDialog({ info, onDismiss }: Props) {
       <div
         ref={cardRef}
         className="w-full max-w-md rounded-lg border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        style={dragStyle}
         onClick={(e) => e.stopPropagation()}
       >
         <h3
           id="update-prompt-title"
           className="text-lg font-semibold text-neutral-50"
+          onMouseDown={onHeaderMouseDown}
         >
           새 버전이 있습니다
         </h3>

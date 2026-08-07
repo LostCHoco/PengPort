@@ -19,6 +19,21 @@ export interface Recipe {
   launch: LaunchAction;
 }
 
+/** `library_list()`가 반환하는 가벼운 뷰 — `Recipe`에서 `archives`/`files`(개별 파일의
+ * `override_content`에 수 MB짜리 리터럴 콘텐츠가 실릴 수 있음)를 뺀 것. 라이브러리
+ * 그리드는 이 타입만으로 카드를 그리고, 설치/실행/상태조회/폴더열기는 전부 id 기반
+ * 커맨드로 처리한다(백엔드가 필요할 때 디스크에서 직접 전체 `Recipe`를 읽음). 실제
+ * 콘텐츠가 필요한 편집 다이얼로그를 열 때만 `libraryGet(id)`로 전체 `Recipe`를 따로
+ * 받는다 — `RecipeSummary`를 `library_install`/`library_launch` 등 콘텐츠가 필요한
+ * 곳에 그대로 넘기면 안 된다(2026-08, 라이브러리 로딩 성능 개선으로 도입). */
+export interface RecipeSummary {
+  id: string;
+  name: string;
+  recipe_info: RecipeInfo;
+  launch: LaunchAction;
+  optional_groups: OptionalGroup[];
+}
+
 // `Recipe.folder_rules` 항목 하나 — 화이트리스트 정리(`Recipe.files` 기준 pruning)의
 // 기본 동작을 폴더 단위로 완화하는 예외 선언. `path`는 `RecipeFile.path`와 같은 표현
 // (대상 루트 기준 상대경로, 슬래시 구분)이고 `Recipe.folder_rules` 안에서 유일해야 함.
@@ -34,7 +49,9 @@ export interface FolderRule {
 // 들어온 허용을 좁히는 예외 — 명시적으로 선언된 `RecipeFile`은 절대 못 지운다
 // (`recipe.rs`의 `FolderRuleMode::Filtered` 문서 참고).
 export type FolderRuleMode =
-  | { kind: "passthrough" }
+  // `ask_on_conflict` — 압축 해제 중 이 폴더 밑에서 이름은 같고 내용은 다른 기존
+  // 파일과 부딪히면 설치를 멈추고 확인받을지(기본 false = 조용히 덮어씀).
+  | { kind: "passthrough"; ask_on_conflict: boolean }
   | { kind: "filtered"; patterns: string[]; disallow_patterns: string[] };
 
 // `Recipe.optional_groups` 항목 하나 — 부분 설치 가능한 그룹의 선언(표시용 메타데이터
@@ -58,19 +75,10 @@ export interface RecipeInfo {
 
 export type ArtifactVerification = { kind: "sha256"; hash: string };
 
-// Rust `FileContent` 는 `#[serde(tag = "encoding")]`.
-export type FileContent =
-  | { encoding: "text"; content: string }
-  | { encoding: "base64"; data: string };
-
-// 순수 태그 — 실제 파싱/patch 적용은 Rust 쪽 `commands/config_patch.rs`가 포맷별로
-// 분기해서 처리한다. 새 포맷이 늘어도 이 union에 문자열 하나 추가되는 것 외엔 프론트
-// 코드(RecipeEditDialog 등)가 안 바뀐다 — `patch`는 항상 포맷 무관 JSON.
-export type ConfigFileFormat = "ini" | "json" | "toml";
-
-// `OverrideContent::ConfigPatch.patch` — ini/toml 은 `{"섹션": {"키": 값}}`, json 은 파일
-// 최상위 구조 그 자체. 포맷 무관 공통 표현이라 구체 타입을 두지 않는다.
-export type ConfigPatch = Record<string, unknown>;
+// Rust `FileContent` 는 `#[serde(tag = "encoding")]`. base64(바이너리) variant는
+// 2026-08 보안 강화로 제거됨 — 검증 안 되는 리터럴 override로 실행 파일을 갈아치울
+// 수 있던 통로라 텍스트 전용으로 축소(`shared/src/library/recipe.rs` 참고).
+export type FileContent = { encoding: "text"; content: string };
 
 // 압축을 받아서 어디에 풀지 — 다운로드는 "무엇을 어디서 받을지"만 정하고, 압축 안의
 // 개별 파일이 정확히 뭔지는 모른다. 실행 시점에 `Recipe.files` 화이트리스트가 담당 —
@@ -111,9 +119,7 @@ export interface PathOverride {
 }
 
 // `RecipeFile::override_content` — 파일에 실제로 어떤 내용을 반영할지.
-export type OverrideContent =
-  | { kind: "literal"; content: FileContent }
-  | { kind: "config_patch"; format: ConfigFileFormat; patch: ConfigPatch };
+export type OverrideContent = { kind: "literal"; content: FileContent };
 
 // 레시피가 아는 파일 하나 — 위치(`path`)가 유일한 진실이고, 있다면 그 위에 덮어씌울
 // 내용까지 이 한 항목이 전부 갖고 있다. `override_content` 가 없으면 압축 해제 결과
@@ -168,7 +174,46 @@ export type InstallOutcome =
   // 사용자가 `libraryCancelInstall`로 도중에 멈춤 — 에러가 아니라 정상적인 사용자
   // 의사결정. 이미 적용된 항목은 되돌리지 않고, 다음 설치 때 마커 기준으로 이어서
   // 진행한다(크래시 복구와 같은 방식).
-  | { kind: "cancelled" };
+  | { kind: "cancelled" }
+  // `Literal` override 파일 중 선언값은 바뀌었는데, 디스크의 실제 내용이 PengPort가
+  // 마지막으로 쓴 것과 달라진(=사용자가 그 사이 직접 건드림) 항목이 있음 — 충돌
+  // 다이얼로그 표시 후 `libraryResolveOverrideConflicts`로 각 파일을 해결하고
+  // 재시도해야 한다.
+  | { kind: "has_override_conflicts"; conflicts: OverrideConflict[] }
+  // 압축 해제 대상(전체 허용 + `ask_on_conflict` 폴더) 안에 이름은 같고 내용은 다른
+  // 파일이 이미 있음 — 충돌 다이얼로그 표시 후 `libraryResolveArchiveConflicts`로
+  // 해결하고 재시도해야 한다.
+  | { kind: "has_archive_conflicts"; archives: ArchiveConflictGroup[] };
+
+// `commands/library.rs` 의 `ArchiveConflictGroup` — 압축 하나에서 발견된 충돌 전부.
+// `archive_hash`는 `libraryResolveArchiveConflicts`가 어느 압축인지 식별하는 키.
+export interface ArchiveConflictGroup {
+  archive_hash: string;
+  url: string;
+  conflicts: string[];
+}
+
+// `commands/library.rs` 의 `ArchiveEntryResolution` — 압축 안 엔트리 하나를 어떻게
+// 처리할지. `rename`은 "전체 허용" 폴더에서만 의미 있다(화이트리스트 강제 폴더면 새
+// 이름 파일이 다음 정리 때 바로 지워짐).
+export type ArchiveEntryResolution =
+  | { action: "overwrite"; path: string }
+  | { action: "skip"; path: string }
+  | { action: "rename"; path: string };
+
+// `commands/library.rs` 의 `OverrideConflict` — 드리프트가 감지된 파일 하나. v1은
+// 경로만(내용 미리보기/diff는 범위 밖).
+export interface OverrideConflict {
+  path: string;
+}
+
+// `commands/library.rs` 의 `OverrideConflictResolution` — 충돌 다이얼로그에서 파일별로
+// 고른 처리 방식. `overwrite`는 서버 쪽에 별도 필드가 없지만, 배열을 균일하게 다루기
+// 위해 여기서도 `path`를 같이 보낸다(백엔드가 알 수 없는 필드로 조용히 무시).
+export type OverrideConflictResolution =
+  | { action: "overwrite"; path: string }
+  | { action: "skip"; path: string }
+  | { action: "adopt_disk"; path: string };
 
 // `commands/library.rs` 의 `InstallStatus` — 카드에 "미설치"/"업데이트 필요" 뱃지를
 // 보여주기 위한 조회 전용(부작용 없음). 원장(마커) 기반 판정 — 지금 실제 파일 내용을

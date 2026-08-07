@@ -152,8 +152,8 @@ fn parse_firefox_download_dir(prefs_text: &str) -> Option<PathBuf> {
 /// `dirs`를 감시하다가, 새/변경된 파일 중 `verification` 해시와 일치하는 걸 찾으면
 /// 그 경로를 반환한다. 파일 크기가 잠시 안정된 뒤에만 해싱하도록 debounce(2초) —
 /// 다운로드 중인 대용량 파일을 매 변경 이벤트마다 통째로 재해싱하는 낭비 방지.
-/// 브라우저가 임시 확장자(`.crdownload`/`.part` 등)를 쓰든 안 쓰든 상관없다 — 아직
-/// 다운로드 중인 파일은 해시가 그냥 안 맞을 뿐이라 자연히 계속 감시된다.
+/// 브라우저의 다운로드-중 임시 확장자(`.crdownload` 등, [`is_browser_in_progress_download`])가
+/// 붙은 파일은 해시가 우연히 일치해도 후보에서 제외한다 — 그 이유는 아래 참고.
 /// 해시가 일치하는 걸 찾으면 그 자리에서 바로 `tmp_dir`로 복사하고(원본 확장자
 /// 보존 — `extract_archive_file`이 형식 판별에 씀) 복사된 경로를 반환한다. "일치
 /// 확인"과 "복사"를 분리하지 않고 같은 루프 이터레이션에서 바로 잇는 이유: Chrome/Edge는
@@ -165,6 +165,14 @@ fn parse_firefox_download_dir(prefs_text: &str) -> Option<PathBuf> {
 /// "파일 없음"으로 실패하면 에러로 끝내지 않고 계속 감시한다: rename 자체가 새
 /// 알림 이벤트를 발생시켜서, 최종 파일명으로 다시 나타난 같은 내용의 파일이 다음
 /// 루프에서 자연히 잡힌다.
+///
+/// 반대 방향의 레이스도 있다: "내용은 이미 완성됐지만 아직 rename 전"인 순간에도
+/// 해시는 이미 일치해버린다 — 이 경우 복사는 (파일이 아직 있으니) 그냥 *성공*하지만
+/// `.crdownload` 확장자가 그대로 굳어져 나중에 형식 판별이 실패한다(2026-08 실사용
+/// 버그: 같은 파일인데 어쩔 땐 되고 어쩔 땐 "지원하지 않는 아카이브 형식" 에러 —
+/// 순전히 이 타이밍에 좌우됨). `is_browser_in_progress_download`로 이런 파일을 아예
+/// 후보에서 걸러서, rename 완료 후 최종 파일명으로 다시 나타나는 이벤트를 기다리게
+/// 한다.
 pub(super) fn watch_for_matching_file(
     dirs: &[PathBuf],
     verification: &ArtifactVerification,
@@ -202,7 +210,10 @@ pub(super) fn watch_for_matching_file(
             Ok(Ok(events)) => {
                 for event in events {
                     for path in &event.paths {
-                        if !path.is_file() || !file_matches(path, verification) {
+                        if !path.is_file()
+                            || is_browser_in_progress_download(path)
+                            || !file_matches(path, verification)
+                        {
                             continue;
                         }
                         match copy_matched_file(path, tmp_dir) {
@@ -230,6 +241,19 @@ pub(super) fn watch_for_matching_file(
             }
         }
     }
+}
+
+/// 브라우저가 다운로드 도중에만 붙이는 임시 확장자 — 이게 붙어있다는 것 자체가
+/// "아직 완료 안 됨(rename 전)"이라는 브라우저 쪽 신호이므로, 안의 바이트가 이미
+/// 최종 콘텐츠와 완전히 같아서 해시가 우연히 일치하더라도 후보로 보지 않는다.
+/// Chrome/Edge/Brave(Chromium 계열) `.crdownload`, Firefox `.part`, 구 Opera
+/// `.opdownload`.
+const BROWSER_IN_PROGRESS_EXTENSIONS: &[&str] = &["crdownload", "part", "opdownload"];
+
+fn is_browser_in_progress_download(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| BROWSER_IN_PROGRESS_EXTENSIONS.iter().any(|known| ext.eq_ignore_ascii_case(known)))
 }
 
 fn file_matches(path: &Path, verification: &ArtifactVerification) -> bool {
@@ -286,7 +310,7 @@ mod tests {
     fn copy_matched_file_preserves_extension() {
         let src_dir = temp_test_dir("copy-src-ext");
         std::fs::create_dir_all(&src_dir).unwrap();
-        let src = src_dir.join("DPJAM_skin.zip");
+        let src = src_dir.join("SampleApp_skin.zip");
         std::fs::write(&src, b"fake zip bytes").unwrap();
 
         let tmp_dir = temp_test_dir("copy-dst-ext");
@@ -326,6 +350,28 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn is_browser_in_progress_download_detects_known_temp_extensions() {
+        assert!(is_browser_in_progress_download(Path::new(
+            "미확인 282412.crdownload"
+        )));
+        assert!(is_browser_in_progress_download(Path::new("SampleApp.part")));
+        assert!(is_browser_in_progress_download(Path::new(
+            "SampleApp.opdownload"
+        )));
+        // 확장자 대소문자 무관.
+        assert!(is_browser_in_progress_download(Path::new(
+            "SampleApp.CRDOWNLOAD"
+        )));
+    }
+
+    #[test]
+    fn is_browser_in_progress_download_false_for_final_filenames() {
+        assert!(!is_browser_in_progress_download(Path::new("SampleApp.7z")));
+        assert!(!is_browser_in_progress_download(Path::new("SampleApp.zip")));
+        assert!(!is_browser_in_progress_download(Path::new("noext")));
     }
 
     #[test]
