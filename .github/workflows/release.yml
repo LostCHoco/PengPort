@@ -27,13 +27,8 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write # gh release create/upload
-    # actions/checkout@v4, actions/setup-node@v4, actions/setup-python@v5 들이 내부적으로
-    # Node 20 사용 중인데 deprecated (Sep 2026 제거). 새 major 가 나오기 전까지 임시로
-    # Node 24 강제 (2026-06-02 부터는 default 가 Node 24 라 이 줄 제거 예정).
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Verify version alignment (tag ≡ tauri.conf.json ≡ Cargo.toml ≡ package.json)
         shell: bash
@@ -72,17 +67,17 @@ jobs:
           echo "✓ tag = tauri.conf = Cargo.toml = package.json = $TAG_VERSION"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11.5.1
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
