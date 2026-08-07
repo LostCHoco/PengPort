@@ -4,6 +4,10 @@
 
 카탈로그·인스턴스 개념은 없다 — 라이브러리(로컬 레시피 목록)가 유일한 데이터 구조다. 항목 추가는 직접 등록하거나, `.pengz` 파일(스냅샷 번들)을 열어 임포트한다. 신뢰는 두 층: ①설치 아티팩트는 항상 서명/해시로 자동 검증 ②`.pengz` 임포트 시 포함 항목 전체를 1회만 confirm — 그 이후 실행은 항상 완전 원클릭.
 
+## 다운로드
+
+[Releases](https://github.com/LostCHoco/PengPort/releases)에서 최신 버전의 포터블 zip을 받아 압축을 풀고 `PengPort.exe`를 실행하면 된다. 설치 프로그램 없음 — 원클릭 컨셉상 그대로 실행만 하면 된다.
+
 ## 이 repo
 
 이 repo는 **클라이언트 (Tauri + React) + 레시피 schema 라이브러리**만 포함한다. 카탈로그/인스턴스 모델 시절의 서버측 컴포넌트는 더 이상 필요 없어 정리됨:
@@ -13,50 +17,6 @@
 | **이 repo** ([LostCHoco/PengPort](https://github.com/LostCHoco/PengPort)) | client(player-launcher) + shared(레시피 schema/검증/trust/prism sync) |
 | [LostCHoco/pengport-gateway](https://github.com/LostCHoco/pengport-gateway) | **archived** — 인스턴스 카탈로그 상시 호스팅 전제가 없어짐 |
 | [LostCHoco/pengport-adapter-minecraft](https://github.com/LostCHoco/pengport-adapter-minecraft) | **archived** — 최소 상태(설치됨/실행중)는 로컬 프로세스 기준이라 원격 상태 서버가 불필요해짐 |
-
-## 구조
-
-```
-.
-├── Cargo.toml                  # workspace root
-├── shared/                     # 레시피 schema(library/) + actions + trust + prism + servers_dat
-├── player-launcher/            # Tauri 2 + React 19 앱
-│   ├── src/                    # React 프론트 (pages/Library.tsx 가 메인 화면)
-│   └── src-tauri/              # Rust 백엔드 (commands/library.rs 가 핵심)
-├── scripts/                    # 빌드 스크립트
-└── docs/                       # spec/, guide/, note/, track/ (git 비추적, 로컬 작업용)
-```
-
-## 개발
-
-### 클라이언트 (dev 모드)
-
-```bash
-cd player-launcher
-pnpm install
-pnpm tauri dev
-```
-
-Prism 경로를 직접 지정하고 싶으면 앱 실행 후 설정 화면에서 override 폴더를 지정한다(개발용 환경변수는 없음).
-
-### 테스트
-
-```bash
-cargo test --workspace
-```
-
-## 배포
-
-### 클라이언트 빌드
-
-```bash
-python scripts/build_client.py
-# 결과: client/build/PengPort-v*.zip
-```
-
-## 진행 중 작업
-
-`docs/track/`(git 비추적, 로컬 전용) 에서 관리. 현재 진행 중인 큰 트랙: **0.2.0 앱 라이브러리 대개편** — 옛 "self-hosted 서비스 카탈로그 클라이언트" 본질을 위 정의로 전면 재정의하고 그에 맞춰 코드를 재작성하는 작업.
 
 ## 라이선스
 
